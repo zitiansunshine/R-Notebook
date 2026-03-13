@@ -3,6 +3,7 @@
 // =============================================================================
 
 export type ChunkLanguage = 'r' | 'python' | 'bash' | 'sql' | string;
+export type ChunkOptionStyle = 'rmd' | 'quarto';
 
 export interface ChunkOptions {
   label?: string;
@@ -24,6 +25,7 @@ export interface RmdChunk {
   kind: ChunkKind;
   language?: ChunkLanguage;
   options: ChunkOptions;
+  optionStyle?: ChunkOptionStyle;
   code: string;            // raw code content (empty for prose)
   prose: string;           // markdown text (empty for code chunks)
   /** 0-based line numbers in the original document */
@@ -37,6 +39,7 @@ const FENCE_RE    = /^```\{(\w+)([^}]*)\}\s*$/;
 const FENCE_END   = /^```\s*$/;
 const YAML_START  = /^---\s*$/;
 const YAML_END    = /^(---|\.\.\.)\s*$/;
+const QUARTO_OPTION_RE = /^\s*#\|\s*([A-Za-z0-9_.-]+)\s*:\s*(.*?)\s*$/;
 
 function parseOptions(optStr: string): ChunkOptions {
   const opts: ChunkOptions = {};
@@ -51,15 +54,97 @@ function parseOptions(optStr: string): ChunkOptions {
       continue;
     }
     const eq = part.indexOf('=');
-    const key = part.slice(0, eq).trim().replace(/\./g, '_');
+    const key = normalizeOptionKey(part.slice(0, eq).trim(), 'rmd');
     const raw = part.slice(eq + 1).trim();
-    // coerce common R values
-    if (raw === 'TRUE' || raw === 'true')   opts[key] = true;
-    else if (raw === 'FALSE' || raw === 'false') opts[key] = false;
-    else if (!isNaN(Number(raw)))            opts[key] = Number(raw);
-    else                                     opts[key] = raw.replace(/^['"]|['"]$/g, '');
+    opts[key] = parseOptionValue(raw);
   }
   return opts;
+}
+
+function parseQuartoOptions(codeLines: string[]): { codeLines: string[]; options: ChunkOptions; optionStyle?: ChunkOptionStyle } {
+  const options: ChunkOptions = {};
+  let index = 0;
+
+  while (index < codeLines.length) {
+    const match = QUARTO_OPTION_RE.exec(codeLines[index]);
+    if (!match) break;
+    const key = normalizeOptionKey(match[1], 'quarto');
+    options[key] = parseOptionValue(match[2]);
+    index++;
+  }
+
+  if (index === 0) {
+    return { codeLines, options, optionStyle: undefined };
+  }
+
+  if (codeLines[index] === '') {
+    index++;
+  }
+
+  return {
+    codeLines: codeLines.slice(index),
+    options,
+    optionStyle: 'quarto',
+  };
+}
+
+function normalizeOptionKey(key: string, style: ChunkOptionStyle): string {
+  return style === 'quarto'
+    ? key.trim().replace(/[.-]/g, '_')
+    : key.trim().replace(/\./g, '_');
+}
+
+function parseOptionValue(raw: string): unknown {
+  const trimmed = raw.trim();
+  if (trimmed === 'TRUE' || trimmed === 'true') return true;
+  if (trimmed === 'FALSE' || trimmed === 'false') return false;
+  if (trimmed === 'NULL' || trimmed === 'null') return null;
+  if (trimmed !== '' && !isNaN(Number(trimmed))) return Number(trimmed);
+  return trimmed.replace(/^['"]|['"]$/g, '');
+}
+
+function stringifyRmdOptionValue(value: unknown): string {
+  if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE';
+  if (value == null) return 'NULL';
+  return String(value);
+}
+
+function stringifyQuartoOptionValue(value: unknown): string {
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  if (value == null) return 'null';
+  return String(value);
+}
+
+export function formatCodeChunk(
+  language: string,
+  options: Record<string, unknown>,
+  code: string,
+  optionStyle: ChunkOptionStyle = 'rmd',
+): string {
+  const header = `\`\`\`{${language}}`;
+  if (optionStyle === 'quarto') {
+    const optionLines: string[] = [];
+    if (options.label != null) {
+      optionLines.push(`#| label: ${stringifyQuartoOptionValue(options.label)}`);
+    }
+    for (const [key, value] of Object.entries(options)) {
+      if (key === 'label' || value === undefined) continue;
+      const quartoKey = key.replace(/_/g, '-');
+      optionLines.push(`#| ${quartoKey}: ${stringifyQuartoOptionValue(value)}`);
+    }
+    const body = [...optionLines, code].filter((line, index, lines) => !(line === '' && index === lines.length - 1)).join('\n');
+    return `${header}\n${body}\n\`\`\``;
+  }
+
+  const optParts: string[] = [];
+  if (options.label != null) optParts.push(String(options.label));
+  for (const [key, value] of Object.entries(options)) {
+    if (key === 'label' || value === undefined) continue;
+    const rKey = key.replace(/_/g, '.');
+    optParts.push(`${rKey}=${stringifyRmdOptionValue(value)}`);
+  }
+  const rmdHeader = `\`\`\`{${language}${optParts.length ? ' ' + optParts.join(', ') : ''}}`;
+  return `${rmdHeader}\n${code}\n\`\`\``;
 }
 
 export function parseRmd(text: string): RmdChunk[] {
@@ -122,13 +207,20 @@ export function parseRmd(text: string): RmdChunk[] {
         idx++;
       }
       const codeEnd = idx;
+      const quartoOptions = parseQuartoOptions(codeLines);
+      const mergedOptions = {
+        ...options,
+        ...quartoOptions.options,
+      };
+      const optionStyle = quartoOptions.optionStyle ?? 'rmd';
 
       chunks.push({
         id: makeId(),
         kind: 'code',
         language: lang,
-        options,
-        code: codeLines.join('\n'),
+        options: mergedOptions,
+        optionStyle,
+        code: quartoOptions.codeLines.join('\n'),
         prose: '',
         startLine: codeStart,
         endLine: codeEnd,
@@ -168,16 +260,6 @@ export function chunksToText(chunks: RmdChunk[]): string {
     if (c.kind === 'prose') {
       return c.prose;
     }
-    // code chunk
-    const optParts: string[] = [];
-    if (c.options.label) optParts.push(c.options.label);
-    for (const [k, v] of Object.entries(c.options)) {
-      if (k === 'label') continue;
-      const rKey = k.replace(/_/g, '.');
-      if (typeof v === 'boolean') optParts.push(`${rKey}=${v ? 'TRUE' : 'FALSE'}`);
-      else optParts.push(`${rKey}=${v}`);
-    }
-    const header = `\`\`\`{${c.language}${optParts.length ? ' ' + optParts.join(', ') : ''}}`;
-    return `${header}\n${c.code}\n\`\`\``;
+    return formatCodeChunk(c.language || 'r', c.options, c.code, c.optionStyle ?? 'rmd');
   }).join('\n');
 }

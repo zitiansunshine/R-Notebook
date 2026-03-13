@@ -1,8 +1,8 @@
 {
   "name": "r-notebook",
   "displayName": "R Notebook",
-  "description": "Native .Rmd and .ipynb support with inline console, plots, and paginated data frames",
-  "version": "1.0.2",
+  "description": "Native .Rmd, .qmd, and .ipynb support with inline console, plots, and paginated data frames",
+  "version": "1.1.0",
   "publisher": "zitiansunsh1ne",
   "author": "Zitian(Andy)Wang",
   "__metadata": {
@@ -30,8 +30,8 @@
     "languages": [
       {
         "id": "rmd",
-        "aliases": ["R Markdown", "RMarkdown", "rmarkdown"],
-        "extensions": [".Rmd", ".rmd"],
+        "aliases": ["R Markdown", "RMarkdown", "rmarkdown", "Quarto", "quarto"],
+        "extensions": [".Rmd", ".rmd", ".Qmd", ".qmd"],
         "configuration": "./language-configuration.json"
       }
     ],
@@ -55,7 +55,9 @@
         "displayName": "R Notebook",
         "selector": [
           { "filenamePattern": "*.Rmd" },
-          { "filenamePattern": "*.rmd" }
+          { "filenamePattern": "*.rmd" },
+          { "filenamePattern": "*.Qmd" },
+          { "filenamePattern": "*.qmd" }
         ]
       },
       {
@@ -72,7 +74,9 @@
         "displayName": "R Notebook Editor",
         "selector": [
           { "filenamePattern": "*.Rmd" },
-          { "filenamePattern": "*.rmd" }
+          { "filenamePattern": "*.rmd" },
+          { "filenamePattern": "*.Qmd" },
+          { "filenamePattern": "*.qmd" }
         ],
         "priority": "option"
       }

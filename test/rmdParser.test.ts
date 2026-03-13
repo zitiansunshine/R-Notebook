@@ -4,7 +4,7 @@
 // =============================================================================
 
 import { describe, it, expect } from 'vitest';
-import { parseRmd, chunksToText, RmdChunk } from '../src/rmdParser';
+import { chunksToText, parseRmd } from '../src/rmdParser';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -24,6 +24,27 @@ library(dplyr)
 More prose.
 
 \`\`\`{r plot, fig.width=7, eval=FALSE}
+plot(mtcars)
+\`\`\`
+`;
+
+const QMD_BASIC = `---
+title: "Quarto Test"
+format: html
+---
+
+Quarto prose.
+
+\`\`\`{r}
+#| label: setup
+#| message: false
+library(dplyr)
+\`\`\`
+
+\`\`\`{r}
+#| label: plot
+#| fig-width: 7
+#| eval: false
 plot(mtcars)
 \`\`\`
 `;
@@ -112,6 +133,21 @@ describe('Code chunks', () => {
     const setup  = chunks.find(c => c.kind === 'code' && c.options.label === 'setup');
     expect(setup?.startLine).toBeGreaterThan(0);
     expect(setup?.endLine).toBeGreaterThan(setup!.startLine);
+  });
+
+  it('parses Quarto option lines without leaving them in code', () => {
+    const chunks = parseRmd(QMD_BASIC);
+    const setup = chunks.find(c => c.kind === 'code' && c.options.label === 'setup');
+    expect(setup?.optionStyle).toBe('quarto');
+    expect(setup?.options.message).toBe(false);
+    expect(setup?.code.trim()).toBe('library(dplyr)');
+  });
+
+  it('parses Quarto dashed keys as normalized option names', () => {
+    const chunks = parseRmd(QMD_BASIC);
+    const plot = chunks.find(c => c.kind === 'code' && c.options.label === 'plot');
+    expect(plot?.options.fig_width).toBe(7);
+    expect(plot?.options.eval).toBe(false);
   });
 });
 
@@ -215,6 +251,16 @@ describe('Round-trip reconstruction', () => {
     const text   = chunksToText(chunks);
     expect(text).toContain('title: "Hello"');
     expect(text).toContain('Prose here.');
+  });
+
+  it('round-trips Quarto chunk options in Quarto style', () => {
+    const chunks = parseRmd(QMD_BASIC);
+    const text = chunksToText(chunks);
+    expect(text).toContain('#| label: setup');
+    expect(text).toContain('#| message: false');
+    expect(text).toContain('#| fig-width: 7');
+    expect(text).toContain('#| eval: false');
+    expect(text).not.toContain('#| label: setup\n#| message: false\n#| library(dplyr)');
   });
 
   it('chunk count is preserved after round-trip', () => {

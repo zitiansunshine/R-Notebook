@@ -10,7 +10,7 @@
 
 import * as vscode from 'vscode';
 import { ExecResult } from './kernelProtocol';
-import { parseRmd } from './rmdParser';
+import { ChunkOptionStyle, formatCodeChunk, parseRmd } from './rmdParser';
 import { execResultFromCellOutputs, notebookOutputFromExecResult } from './rmdOutputStore';
 import { fingerprintNotebookCodeCell, StoredExecResultState } from './rmdResultMapping';
 import {
@@ -23,6 +23,7 @@ import {
 type RmdCellMetadata = {
   kind?: 'yaml_frontmatter';
   options?: Record<string, unknown>;
+  optionStyle?: ChunkOptionStyle;
 };
 
 export class RmdNotebookSerializer implements vscode.NotebookSerializer {
@@ -60,7 +61,7 @@ export class RmdNotebookSerializer implements vscode.NotebookSerializer {
           chunk.code,
           chunk.language || 'r',
         );
-        cell.metadata = { options: chunk.options };
+        cell.metadata = { options: chunk.options, optionStyle: chunk.optionStyle };
         cell.outputs = notebookOutputFromExecResult(restoredResults.get(chunk.id) ?? null, chunk.id);
         cells.push(cell);
       }
@@ -88,19 +89,7 @@ export class RmdNotebookSerializer implements vscode.NotebookSerializer {
         const meta = (cell.metadata ?? {}) as RmdCellMetadata;
         const lang = cell.languageId || 'r';
         const opts: Record<string, unknown> = meta.options ?? {};
-        const optParts: string[] = [];
-        if (opts['label']) optParts.push(String(opts['label']));
-        for (const [k, v] of Object.entries(opts)) {
-          if (k === 'label' || v == null) continue;
-          const rKey = k.replace(/_/g, '.');
-          if (typeof v === 'boolean') {
-            if (!v) optParts.push(`${rKey}=FALSE`);
-          } else {
-            optParts.push(`${rKey}=${v}`);
-          }
-        }
-        const fence = `\`\`\`{${lang}${optParts.length ? ' ' + optParts.join(', ') : ''}}`;
-        parts.push(`${fence}\n${cell.value}\n\`\`\``);
+        parts.push(formatCodeChunk(lang, opts, cell.value, meta.optionStyle ?? 'rmd'));
         codeCellStates.push({
           fingerprint: fingerprintNotebookCodeCell(lang, cell.value, opts),
           result: normalizePersistedExecResult(execResultFromCellOutputs(cell.outputs)),
