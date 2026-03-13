@@ -3,10 +3,10 @@
   "displayName": "R Notebook",
   "description": "Native .Rmd and .ipynb support with inline console, plots, and paginated data frames",
   "version": "1.0.0",
-  "publisher": "AndyWang",
-  "author": "Andy Wang",
+  "publisher": "zitiansunsh1ne",
+  "author": "Zitian(Andy)Wang",
   "__metadata": {
-    "publisherDisplayName": "AndyWang"
+    "publisherDisplayName": "Zitian(Andy)Wang"
   },
   "repository": {
     "type": "git",
