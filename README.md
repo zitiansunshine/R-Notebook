@@ -1,6 +1,6 @@
 # R Notebook
 
-R Notebook is a VS Code extension for `.Rmd` and `.ipynb` workflows with inline execution, notebook-style outputs, plots, and session-aware tooling for day-to-day data science work.
+R Notebook is a VSCode extension (https://marketplace.visualstudio.com/items?itemName=zitiansunsh1ne.r-notebook) for `.Rmd` and `.ipynb` workflows with inline execution, notebook-style outputs, plots, and session-aware tooling for day-to-day data science work.
 
 ## Features
 
@@ -14,7 +14,7 @@ R Notebook is a VS Code extension for `.Rmd` and `.ipynb` workflows with inline 
 
 ## AI Editing Support
 
-R Notebook works well with AI-powered editing and review tools, including GitHub Copilot, Cursor, and Antigravity. You can keep an `.Rmd` notebook open, ask an AI tool to revise analysis code or documentation, and continue executing chunks with the same inline notebook experience.
+R Notebook works well with AI-powered editing and review tools, including GitHub Copilot, Cursor, and Antigravity. You can keep an `.Rmd` notebook open, ask an AI tool to revise analysis code or documentation, and continue executing chunks with the same inline notebook experience. 
 
 ## Preview
 
