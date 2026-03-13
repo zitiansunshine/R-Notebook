@@ -29,12 +29,6 @@ import {
 
 export const PY_NOTEBOOK_TYPE = PY_NOTEBOOK_TYPE_ID;
 
-function hiddenNotebookAffinity(): number | undefined {
-  return (vscode as typeof vscode & {
-    NotebookControllerAffinity2?: { Hidden?: number };
-  }).NotebookControllerAffinity2?.Hidden;
-}
-
 // ---------------------------------------------------------------------------
 // Minimal interface so controllers can notify the variable provider without
 // importing variableProvider.ts (avoids circular deps).
@@ -370,9 +364,29 @@ export class PyNotebookController implements vscode.Disposable {
     return tracked;
   }
 
-  public interruptNotebook(docUri: string): void {
+  public interruptNotebook(docUri: string): boolean {
+    const session = getPySession(docUri);
+    const interrupted = session?.isBusy() ?? false;
     this.bumpQueueEpoch(docUri);
-    getPySession(docUri)?.interrupt();
+    session?.interrupt();
+    return interrupted;
+  }
+
+  public async restartNotebook(notebook: vscode.NotebookDocument): Promise<boolean> {
+    if (notebook.notebookType !== PY_NOTEBOOK_TYPE) return false;
+    const docUri = notebook.uri.toString();
+    const descriptor = this.resolveDescriptorForNotebook(notebook);
+    const session = getOrCreatePySession(
+      docUri,
+      descriptor.pythonPath,
+      descriptor.env,
+      this.execTimeoutMs(),
+    );
+    session.setKernel(descriptor.pythonPath, descriptor.env);
+    this.bindSession(docUri, session);
+    await session.restart();
+    this.varNotifier?.notifyChanged(notebook);
+    return true;
   }
 
   private bindSession(docUri: string, session: ReturnType<typeof getOrCreatePySession>): void {
@@ -501,14 +515,6 @@ export class PyNotebookController implements vscode.Disposable {
 
   private syncNotebookAffinities(notebook: vscode.NotebookDocument): void {
     if (notebook.notebookType !== PY_NOTEBOOK_TYPE) return;
-    const hiddenAffinity = hiddenNotebookAffinity();
-    if (typeof hiddenAffinity === 'number') {
-      for (const entry of this.controllers.values()) {
-        entry.controller.updateNotebookAffinity(notebook, hiddenAffinity);
-      }
-      return;
-    }
-
     const preferred = this.resolveDescriptorForNotebook(notebook);
     for (const entry of this.controllers.values()) {
       entry.controller.updateNotebookAffinity(

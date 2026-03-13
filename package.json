@@ -2,7 +2,7 @@
   "name": "r-notebook",
   "displayName": "R Notebook",
   "description": "Native .Rmd and .ipynb support with inline console, plots, and paginated data frames",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "publisher": "zitiansunsh1ne",
   "author": "Zitian(Andy)Wang",
   "__metadata": {
@@ -13,10 +13,6 @@
     "url": "https://github.com/zitiansunshine/R-Notebook"
   },
   "engines": { "vscode": "^1.85.0" },
-  "enabledApiProposals": [
-    "notebookKernelSource",
-    "notebookControllerAffinityHidden"
-  ],
   "categories": ["Programming Languages", "Notebooks"],
   "icon": "icon-enhance.png",
   "main": "./out/extension.js",
@@ -24,6 +20,9 @@
     "onNotebook:rNotebook.rmarkdownNotebook",
     "onNotebook:rNotebook.pythonNotebook",
     "onCustomEditor:rNotebook.rmarkdownEditor",
+    "onCommand:rNotebook.notebook.interrupt",
+    "onCommand:rNotebook.notebook.restart",
+    "onCommand:rNotebook.notebook.showVariables",
     "onLanguage:r",
     "onLanguage:python"
   ],

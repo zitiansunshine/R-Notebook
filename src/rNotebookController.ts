@@ -39,12 +39,6 @@ import type { VariableNotifier } from './pyNotebookController';
 
 export const NOTEBOOK_TYPE = R_NOTEBOOK_TYPE;
 
-function hiddenNotebookAffinity(): number | undefined {
-  return (vscode as typeof vscode & {
-    NotebookControllerAffinity2?: { Hidden?: number };
-  }).NotebookControllerAffinity2?.Hidden;
-}
-
 type LiveExecutionState = {
   chunkId: string;
   cellDocUri: string;
@@ -260,14 +254,6 @@ export class RNotebookController {
 
   private syncNotebookAffinities(notebook: vscode.NotebookDocument): void {
     if (notebook.notebookType !== NOTEBOOK_TYPE) return;
-    const hiddenAffinity = hiddenNotebookAffinity();
-    if (typeof hiddenAffinity === 'number') {
-      for (const entry of this.controllers.values()) {
-        entry.controller.updateNotebookAffinity(notebook, hiddenAffinity);
-      }
-      return;
-    }
-
     const preferred = this.resolveDescriptorForNotebook(notebook);
     for (const entry of this.controllers.values()) {
       entry.controller.updateNotebookAffinity(
@@ -520,9 +506,24 @@ export class RNotebookController {
     return tracked;
   }
 
-  public interruptNotebook(docUri: string): void {
+  public interruptNotebook(docUri: string): boolean {
+    const session = getSession(docUri);
+    const interrupted = session?.isBusy() ?? false;
     this.bumpQueueEpoch(docUri);
-    getSession(docUri)?.interrupt();
+    session?.interrupt();
+    return interrupted;
+  }
+
+  public async restartNotebook(notebook: vscode.NotebookDocument): Promise<boolean> {
+    if (notebook.notebookType !== NOTEBOOK_TYPE) return false;
+    const docUri = notebook.uri.toString();
+    const descriptor = this.resolveDescriptorForNotebook(notebook);
+    const session = getOrCreateSession(docUri, descriptor.rPath, this.execTimeoutMs());
+    session.setExecutablePath(descriptor.rPath);
+    this.bindSession(docUri, session);
+    await session.restart();
+    this.varNotifier?.notifyChanged(notebook);
+    return true;
   }
 
   private bindSession(docUri: string, session: ReturnType<typeof getOrCreateSession>): void {

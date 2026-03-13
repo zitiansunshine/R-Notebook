@@ -5,8 +5,8 @@
 import * as vscode from 'vscode';
 
 import { RMarkdownEditorProvider }                                     from './rmarkdownEditor';
-import { disposeSession, getAllSessions, getSession }                  from './rSessionManager';
-import { disposePySession, getAllPySessions, getPySession }            from './pySessionManager';
+import { disposeSession, getAllSessions }                              from './rSessionManager';
+import { disposePySession, getAllPySessions }                          from './pySessionManager';
 import { RmdNotebookSerializer }                                       from './rmdNotebookSerializer';
 import { IpynbSerializer }                                             from './ipynbSerializer';
 import { RNotebookController, NOTEBOOK_TYPE, registerFigureOptions }   from './rNotebookController';
@@ -15,7 +15,6 @@ import { RmdOutputStore }                                              from './r
 import { PyNotebookController, PY_NOTEBOOK_TYPE, registerPyFigureOptions } from './pyNotebookController';
 import { RNotebookVariableProvider }                                   from './variableProvider';
 import { forgetRNotebookKernel }                                       from './notebookKernelState';
-import { registerNotebookKernelSourceProviders }                       from './notebookKernelSourceProvider';
 import {
   COMMAND_IDS,
   EXTENSION_BRAND,
@@ -23,6 +22,8 @@ import {
 } from './extensionIds';
 
 // ---------------------------------------------------------------------------
+
+let lastActiveNotebookUri: string | undefined;
 
 export function activate(ctx: vscode.ExtensionContext): void {
 
@@ -64,28 +65,12 @@ export function activate(ctx: vscode.ExtensionContext): void {
   ctx.subscriptions.push(pyController);
   registerPyFigureOptions(ctx);
 
+  rememberNotebookDocument(vscode.window.activeNotebookEditor?.notebook);
   ctx.subscriptions.push(
-    vscode.commands.registerCommand(
-      COMMAND_IDS.notebookSelectAvailableRKernels,
-      async (target?: unknown) => {
-        const notebook = resolveNotebookDocument(target);
-        if (notebook?.notebookType && notebook.notebookType !== NOTEBOOK_TYPE) return;
-        await rController.showKernelPicker(notebook);
-      },
-    ),
-    vscode.commands.registerCommand(
-      COMMAND_IDS.notebookSelectAvailablePythonKernels,
-      async (target?: unknown) => {
-        const notebook = resolveNotebookDocument(target);
-        if (notebook?.notebookType && notebook.notebookType !== PY_NOTEBOOK_TYPE) return;
-        await pyController.showKernelPicker(notebook, {
-          includeManual: false,
-          title: 'Select Python Kernel',
-        });
-      },
-    ),
+    vscode.window.onDidChangeActiveNotebookEditor((editor) => {
+      rememberNotebookDocument(editor?.notebook);
+    }),
   );
-  registerNotebookKernelSourceProviders(ctx);
 
   if (typeof vscode.notebooks.createRendererMessaging === 'function') {
     const rendererMessaging = vscode.notebooks.createRendererMessaging('rNotebook.execResultRenderer');
@@ -114,6 +99,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
   ctx.subscriptions.push(
     vscode.workspace.onDidCloseNotebookDocument((notebook) => {
       const uri = notebook.uri.toString();
+      if (lastActiveNotebookUri === uri) lastActiveNotebookUri = undefined;
       if (notebook.notebookType === NOTEBOOK_TYPE) {
         // Reopened notebook cells get fresh document URIs, so stale cached output
         // mappings must not survive close/reopen cycles.
@@ -172,29 +158,30 @@ export function activate(ctx: vscode.ExtensionContext): void {
       let interrupted = false;
 
       if (notebook) {
+        rememberNotebookDocument(notebook);
         const uri  = notebook.uri.toString();
         const type = notebook.notebookType;
 
         if (type === NOTEBOOK_TYPE) {
-          rController.interruptNotebook(uri);
-          interrupted = true;
+          interrupted = rController.interruptNotebook(uri);
         } else if (type === PY_NOTEBOOK_TYPE) {
-          pyController.interruptNotebook(uri);
-          interrupted = true;
+          interrupted = pyController.interruptNotebook(uri);
         }
       }
 
       if (!interrupted) {
         for (const [uri, session] of getAllSessions()) {
           if (!session.isBusy()) continue;
-          rController.interruptNotebook(uri);
-          interrupted = true;
+          interrupted = rController.interruptNotebook(uri) || interrupted;
         }
         for (const [uri, session] of getAllPySessions()) {
           if (!session.isBusy()) continue;
-          pyController.interruptNotebook(uri);
-          interrupted = true;
+          interrupted = pyController.interruptNotebook(uri) || interrupted;
         }
+      }
+
+      if (!interrupted) {
+        vscode.window.showWarningMessage('No running kernel to interrupt.');
       }
     }),
   );
@@ -203,15 +190,23 @@ export function activate(ctx: vscode.ExtensionContext): void {
   ctx.subscriptions.push(
     vscode.commands.registerCommand(COMMAND_IDS.notebookRestart, async (target?: unknown) => {
       const notebook = resolveNotebookDocument(target);
-      if (!notebook) return;
-      const uri  = notebook.uri.toString();
+      if (!notebook) {
+        vscode.window.showWarningMessage('Open an R Notebook or Python Notebook to restart its kernel.');
+        return;
+      }
+      rememberNotebookDocument(notebook);
       const type = notebook.notebookType;
 
       try {
+        let restarted = false;
         if (type === NOTEBOOK_TYPE) {
-          await getSession(uri)?.restart();
+          restarted = await rController.restartNotebook(notebook);
         } else if (type === PY_NOTEBOOK_TYPE) {
-          await getPySession(uri)?.restart();
+          restarted = await pyController.restartNotebook(notebook);
+        }
+        if (!restarted) {
+          vscode.window.showWarningMessage('Unable to determine which kernel to restart for this notebook.');
+          return;
         }
         vscode.window.showInformationMessage('Kernel restarted.');
       } catch (err: any) {
@@ -224,7 +219,9 @@ export function activate(ctx: vscode.ExtensionContext): void {
   let varPanel: vscode.WebviewPanel | undefined;
 
   ctx.subscriptions.push(
-    vscode.commands.registerCommand(COMMAND_IDS.notebookShowVariables, async () => {
+    vscode.commands.registerCommand(COMMAND_IDS.notebookShowVariables, async (target?: unknown) => {
+      const notebook = resolveNotebookDocument(target);
+      rememberNotebookDocument(notebook);
       // Collect vars from ALL active R and Python sessions
       interface SessionVars {
         language: 'R' | 'Python';
@@ -257,6 +254,15 @@ export function activate(ctx: vscode.ExtensionContext): void {
         }
       }
 
+      if (notebook) {
+        const notebookUri = notebook.uri.toString();
+        sections.sort((a, b) => {
+          const aRank = a.doc === notebookUri ? 0 : 1;
+          const bRank = b.doc === notebookUri ? 0 : 1;
+          return aRank - bRank || a.doc.localeCompare(b.doc);
+        });
+      }
+
       const html = buildVarsPanelHtml(sections);
 
       if (varPanel) {
@@ -280,28 +286,72 @@ export function activate(ctx: vscode.ExtensionContext): void {
 export function deactivate(): void { /* sessions disposed per-document */ }
 
 function resolveNotebookDocument(target?: unknown): vscode.NotebookDocument | undefined {
+  return resolveNotebookTarget(target)
+    ?? findNotebookByUri(lastActiveNotebookUri)
+    ?? managedNotebook(vscode.window.activeNotebookEditor?.notebook)
+    ?? vscode.window.visibleNotebookEditors
+      .map((editor) => editor.notebook)
+      .find((notebook) => isManagedNotebookDocument(notebook))
+    ?? vscode.workspace.notebookDocuments.find((notebook) => isManagedNotebookDocument(notebook));
+}
+
+function resolveNotebookTarget(target?: unknown): vscode.NotebookDocument | undefined {
+  if (Array.isArray(target)) {
+    for (const entry of target) {
+      const resolved = resolveNotebookTarget(entry);
+      if (resolved) return resolved;
+    }
+    return undefined;
+  }
+
+  if (target instanceof vscode.Uri) {
+    return findNotebookByUri(target.toString());
+  }
+
   if (target && typeof target === 'object') {
     const candidate = target as {
       notebook?: vscode.NotebookDocument;
       notebookEditor?: vscode.NotebookEditor;
       cell?: vscode.NotebookCell;
       uri?: vscode.Uri;
+      resource?: vscode.Uri;
       notebookType?: string;
       notebookUri?: vscode.Uri;
     };
-    if (candidate.notebook) return candidate.notebook;
-    if (candidate.notebookEditor?.notebook) return candidate.notebookEditor.notebook;
-    if (candidate.cell?.notebook) return candidate.cell.notebook;
+    if (isManagedNotebookDocument(candidate.notebook)) return candidate.notebook;
+    if (isManagedNotebookDocument(candidate.notebookEditor?.notebook)) return candidate.notebookEditor?.notebook;
+    if (isManagedNotebookDocument(candidate.cell?.notebook)) return candidate.cell?.notebook;
     if (candidate.uri && candidate.notebookType) {
-      return candidate as unknown as vscode.NotebookDocument;
+      const notebook = candidate as unknown as vscode.NotebookDocument;
+      return isManagedNotebookDocument(notebook) ? notebook : undefined;
     }
-    const resource = candidate.notebookUri ?? candidate.uri;
-    if (resource) {
-      const match = vscode.workspace.notebookDocuments.find((doc) => doc.uri.toString() === resource.toString());
-      if (match) return match;
-    }
+    const resource = candidate.notebookUri ?? candidate.resource ?? candidate.uri;
+    if (resource) return findNotebookByUri(resource.toString());
   }
-  return vscode.window.activeNotebookEditor?.notebook;
+
+  return undefined;
+}
+
+function rememberNotebookDocument(notebook?: vscode.NotebookDocument): void {
+  if (!isManagedNotebookDocument(notebook)) return;
+  lastActiveNotebookUri = notebook.uri.toString();
+}
+
+function findNotebookByUri(uri?: string): vscode.NotebookDocument | undefined {
+  if (!uri) return undefined;
+  const notebook = vscode.workspace.notebookDocuments.find((doc) => doc.uri.toString() === uri);
+  return managedNotebook(notebook);
+}
+
+function managedNotebook(
+  notebook?: vscode.NotebookDocument,
+): vscode.NotebookDocument | undefined {
+  return isManagedNotebookDocument(notebook) ? notebook : undefined;
+}
+
+function isManagedNotebookDocument(notebook?: vscode.NotebookDocument): boolean {
+  return notebook?.notebookType === NOTEBOOK_TYPE
+    || notebook?.notebookType === PY_NOTEBOOK_TYPE;
 }
 
 function buildConsoleTabHtml(chunkId: string, content: string): string {
