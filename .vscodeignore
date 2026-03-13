@@ -1,0 +1,12 @@
+.claude/
+.vscode/
+.gitignore
+node_modules/
+out/**/*.map
+src/
+test/
+esbuild.js
+tsconfig.json
+vitest.config.ts
+package-lock.json
+**/.DS_Store

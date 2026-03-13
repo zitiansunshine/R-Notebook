@@ -1,0 +1,909 @@
+/* ============================================================
+   RNotebook — RMarkdown Panel Styles
+   ============================================================ */
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: var(--vscode-font-family, -apple-system, sans-serif);
+  font-size: var(--vscode-editor-font-size, 13px);
+  color: var(--vscode-editor-foreground);
+  background: var(--vscode-editor-background);
+}
+
+/* ---- Toolbar ----------------------------------------------------------- */
+#toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--vscode-editorGroupHeader-tabsBackground);
+  border-bottom: 1px solid var(--vscode-editorGroup-border);
+}
+
+#toolbar button {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  border: none;
+  border-radius: 3px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+#toolbar button:hover { background: var(--vscode-button-hoverBackground); }
+
+.status-idle    { color: var(--vscode-testing-iconPassed, #4caf50); margin-left: auto; font-size: 12px; }
+.status-running { color: var(--vscode-charts-yellow, #e5c07b);      margin-left: auto; font-size: 12px; }
+.status-error   { color: var(--vscode-testing-iconFailed, #e06c75); margin-left: auto; font-size: 12px; }
+
+/* ---- Main layout: toolbar pinned top, content+panel fill remaining height */
+body {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+#toolbar { flex-shrink: 0; }
+#main-layout {
+  flex: 1;
+  display: flex;
+  flex-direction: row;
+  overflow: hidden;
+}
+
+/* ---- Main container ---------------------------------------------------- */
+#rmd-container {
+  flex: 1;
+  padding: 16px 20px;
+  overflow-y: auto;
+}
+#rmd-container > * { max-width: 860px; margin-left: auto; margin-right: auto; }
+
+.kernel-error-banner {
+  padding: 10px 14px;
+  background: var(--vscode-inputValidation-errorBackground, #5a1d1d);
+  color: var(--vscode-inputValidation-errorForeground, #f48771);
+  border-radius: 4px;
+  margin-bottom: 12px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
+}
+
+/* ---- Chunk wrappers ---------------------------------------------------- */
+.chunk { margin-bottom: 12px; }
+
+/* ---- YAML Front Matter ------------------------------------------------- */
+.frontmatter-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--vscode-descriptionForeground);
+  letter-spacing: 0.5px;
+  padding: 4px 0 2px;
+}
+
+/* ---- Prose chunks ------------------------------------------------------ */
+.prose-editor {
+  padding: 6px 2px 10px;
+  line-height: 1.7;
+  color: var(--vscode-foreground);
+  outline: none;
+  min-height: 24px;
+  border-radius: 3px;
+  cursor: text;
+}
+.prose-editor:focus {
+  background: var(--vscode-editor-background);
+  border: 1px dashed var(--vscode-focusBorder, #007acc);
+  padding: 5px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: var(--vscode-editor-font-size, 13px);
+  white-space: pre-wrap;
+}
+.prose-editor h1, .prose-editor h2, .prose-editor h3,
+.prose-editor h4, .prose-editor h5, .prose-editor h6 {
+  margin: 10px 0 4px;
+  font-weight: 600;
+  color: var(--vscode-foreground);
+}
+.prose-editor h1 { font-size: 1.6em; border-bottom: 1px solid var(--vscode-editorGroup-border); padding-bottom: 4px; }
+.prose-editor h2 { font-size: 1.3em; }
+.prose-editor h3 { font-size: 1.1em; }
+.prose-editor p { margin: 6px 0; }
+.prose-editor strong { font-weight: 700; }
+.prose-editor em { font-style: italic; color: var(--vscode-descriptionForeground); }
+.prose-editor code {
+  background: var(--vscode-textBlockQuote-background);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.9em;
+}
+.prose-editor blockquote {
+  border-left: 3px solid var(--vscode-textBlockQuote-border, #007acc);
+  padding-left: 10px;
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+}
+.prose-editor hr { border: none; border-top: 1px solid var(--vscode-editorGroup-border); margin: 10px 0; }
+
+/* ---- Code chunk layout ------------------------------------------------- */
+/* Outer bordered box — grey ring always on all 4 sides, never clippable.
+   Hard fallback #c0c0c0 ensures visibility regardless of VS Code theme. */
+.chunk-code-block {
+  border-radius: 4px;
+  overflow: hidden;
+  box-shadow: 0 0 0 1px var(--vscode-editorGroup-border, #c0c0c0);
+}
+/* While editing: keep the grey ring AND add a subtle blue glow outside it */
+.chunk-code-block:focus-within {
+  box-shadow:
+    0 0 0 1px var(--vscode-editorGroup-border, #c0c0c0),
+    0 0 0 3px rgba(0, 120, 212, 0.18);
+}
+
+.chunk-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: var(--vscode-editorGroupHeader-tabsBackground);
+  border-bottom: 1px solid var(--vscode-editorGroup-border);
+  user-select: none;
+}
+
+.lang-badge {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+  padding: 1px 6px;
+  border-radius: 10px;
+  user-select: none;
+}
+/* Per-language badge tints (override the default badge colour) */
+.lang-badge.lang-r    { background: #1e6b9a; color: #fff; }
+.lang-badge.lang-bash { background: #2d6a2d; color: #fff; }
+.lang-badge.lang-markdown { background: #5a3e7a; color: #fff; }
+
+/* ---- Language <select> in chunk headers -------------------------------- */
+/* Native select avoids accidental language changes from floating menus */
+.lang-select {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+  border: none;
+  border-radius: 4px;
+  padding: 1px 4px;
+  cursor: pointer;
+}
+.lang-select:focus { outline: 1px solid var(--vscode-focusBorder, #007acc); outline-offset: 1px; }
+.lang-select.lang-r        { background: #1e6b9a; color: #fff; }
+.lang-select.lang-bash     { background: #2d6a2d; color: #fff; }
+.lang-select.lang-markdown { background: #5a3e7a; color: #fff; }
+
+.chunk-label {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+  cursor: text;
+  border-radius: 2px;
+  padding: 1px 4px;
+  min-width: 24px;
+}
+.chunk-label:focus {
+  outline: 1px dashed var(--vscode-focusBorder, #007acc);
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+}
+.chunk-label:empty::before {
+  content: 'label…';
+  opacity: 0.4;
+  font-style: italic;
+  pointer-events: none;
+}
+
+/* ---- Tab-completion dropdown ------------------------------------------- */
+.completion-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 200;
+  min-width: 180px;
+  max-width: 320px;
+  background: var(--vscode-editorSuggestWidget-background, var(--vscode-editor-background));
+  border: 1px solid var(--vscode-editorSuggestWidget-border, var(--vscode-editorGroup-border));
+  border-radius: 3px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+  overflow: hidden;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.completion-item {
+  padding: 3px 10px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: var(--vscode-editor-font-size, 13px);
+  color: var(--vscode-editorSuggestWidget-foreground, var(--vscode-editor-foreground));
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.completion-item:hover,
+.completion-item.active {
+  background: var(--vscode-editorSuggestWidget-selectedBackground, var(--vscode-list-activeSelectionBackground));
+  color: var(--vscode-list-activeSelectionForeground, var(--vscode-editor-foreground));
+}
+
+.edit-hint {
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.6;
+  font-style: italic;
+}
+
+.header-spacer { flex: 1; }
+
+.run-btn {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  border: none;
+  border-radius: 3px;
+  padding: 3px 10px;
+  cursor: pointer;
+  font-size: 11px;
+}
+.run-btn:hover { background: var(--vscode-button-hoverBackground); }
+
+/* ⚙ options toggle + + add-below buttons in chunk header */
+.opts-btn, .add-chunk-btn {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 1px 5px;
+}
+.opts-btn:hover, .add-chunk-btn:hover {
+  border-color: var(--vscode-editorGroup-border);
+  color: var(--vscode-foreground);
+}
+
+/* ---- Chunk options bar -------------------------------------------------- */
+.chunk-opts-bar {
+  display: none;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 6px 12px;
+  background: var(--vscode-editorGroupHeader-tabsBackground);
+  border-bottom: 1px solid var(--vscode-editorGroup-border);
+  font-size: 11px;
+}
+.chunk-opts-bar.open { display: flex; }
+
+.opt-field {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--vscode-foreground);
+  white-space: nowrap;
+}
+.opt-field input[type="text"],
+.opt-field input[type="number"] {
+  width: 52px;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border, var(--vscode-editorGroup-border));
+  border-radius: 3px;
+  padding: 1px 4px;
+  font-size: 11px;
+}
+.opt-field input[type="text"] { width: 90px; }
+.opt-field input[type="checkbox"] { cursor: pointer; }
+
+.del-chunk-btn {
+  margin-left: auto;
+  background: none;
+  border: 1px solid var(--vscode-testing-iconFailed, #e06c75);
+  color: var(--vscode-testing-iconFailed, #e06c75);
+  border-radius: 3px;
+  padding: 2px 8px;
+  cursor: pointer;
+  font-size: 11px;
+}
+.del-chunk-btn:hover {
+  background: var(--vscode-testing-iconFailed, #e06c75);
+  color: #fff;
+}
+
+.spinner {
+  font-size: 14px;
+  animation: spin 1s linear infinite;
+  display: inline-block;
+}
+.spinner.hidden { display: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---- Code editor (highlighted view + textarea overlay) ----------------- */
+.code-editor-wrap {
+  display: flex;
+  align-items: stretch;
+  background: var(--vscode-editor-background);
+  overflow: hidden;
+}
+
+/* Left-side execution progress bar */
+.chunk-progress-bar {
+  display: none;
+  width: 8px;
+  flex-shrink: 0;
+  position: relative;
+  background: var(--vscode-editorGroup-border);
+}
+.chunk-progress-bar.active { display: block; }
+.chunk-progress-bar-fill {
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 0;
+  background: var(--vscode-progressBar-background, #007acc);
+  transition: height 0.15s ease;
+}
+.chunk-progress-bar.indeterminate .chunk-progress-bar-fill {
+  height: 35% !important;
+  animation: progress-indeterminate 1.2s ease-in-out infinite;
+}
+@keyframes progress-indeterminate {
+  0%   { top: 0%;  }
+  50%  { top: 65%; }
+  100% { top: 0%;  }
+}
+
+/* Line-number gutter */
+.code-gutter {
+  display: none;
+  padding: 10px 8px 10px 6px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: var(--vscode-editor-font-size, 13px);
+  line-height: 1.5;
+  color: var(--vscode-editorLineNumber-foreground, #858585);
+  text-align: right;
+  user-select: none;
+  min-width: 28px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--vscode-editorGroup-border);
+  white-space: pre;
+  background: var(--vscode-editorGutter-background, var(--vscode-editor-background));
+}
+.code-gutter.visible { display: block; }
+
+/* Inner container — CSS grid so code-view and textarea share the same cell.
+   The code-view (with real content) drives the grid row height automatically;
+   no JS resize is needed. The textarea overlays it with transparent text. */
+.code-editor-main {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr;
+  min-width: 0;
+}
+
+/* Highlighted view — placed in grid cell 1/1, behind the textarea */
+.code-view {
+  grid-row: 1;
+  grid-column: 1;
+  position: relative;
+  z-index: 0;
+  padding: 10px 14px 28px;  /* extra bottom so caret on last line is never clipped */
+  margin: 0;
+  font-family: var(--vscode-editor-font-family, 'Consolas', 'Courier New', monospace);
+  font-size: var(--vscode-editor-font-size, 13px);
+  line-height: 1.5;
+  white-space: pre;
+  overflow: hidden;
+  color: var(--vscode-editor-foreground);
+  min-height: 36px;
+  pointer-events: none;
+}
+
+/* Base textarea styles (also used by frontmatter) */
+.code-textarea {
+  display: block;
+  width: 100%;
+  padding: 10px 14px 28px;  /* match code-view bottom padding so caret is always visible */
+  font-family: var(--vscode-editor-font-family, 'Consolas', 'Courier New', monospace);
+  font-size: var(--vscode-editor-font-size, 13px);
+  line-height: 1.5;
+  color: var(--vscode-editor-foreground);
+  background: var(--vscode-editor-background);
+  border: none;
+  outline: 2px solid var(--vscode-focusBorder, #007acc);
+  resize: none;
+  overflow: hidden;
+  white-space: pre;
+  tab-size: 2;
+  min-height: 36px;
+}
+/* Grid-overlay textarea (code chunks) — same grid cell as code-view, on top */
+.code-editor-main .code-textarea {
+  grid-row: 1;
+  grid-column: 1;
+  position: relative;
+  z-index: 1;
+  color: transparent;
+  caret-color: var(--vscode-editor-foreground);
+  -webkit-text-fill-color: transparent;
+  background: transparent;
+  outline: none;
+}
+
+/* Chunk state ring decorations — hard-coded colours override grey base ring.
+   Defined after :focus-within so they always win regardless of focus state. */
+.state-running .chunk-code-block { box-shadow: 0 0 0 2px #e5c07b; }
+.state-done    .chunk-code-block { box-shadow: 0 0 0 2px #4caf50; }
+.state-error   .chunk-code-block { box-shadow: 0 0 0 2px #e06c75; }
+
+/* ---- R Syntax Highlighting Token Colours ------------------------------- */
+/* Colours approximate RStudio's default dark theme (One Dark-ish) */
+
+.r-keyword  { color: #c678dd; font-weight: 600; }   /* purple  — function, if, TRUE, NA… */
+.r-string   { color: #98c379; }                      /* green   — "strings", 'strings' */
+.r-comment  { color: #7f848e; font-style: italic; }  /* grey    — # comment */
+.r-number   { color: #d19a66; }                      /* orange  — 42, 3.14, 1L */
+.r-func     { color: #61afef; }                      /* blue    — function calls */
+.r-op       { color: #56b6c2; }                      /* cyan    — <-, ->, |>, %in% */
+
+/* ---- Output area ------------------------------------------------------- */
+.chunk-output { margin-top: 4px; }
+.chunk-output:empty { display: none; }
+
+.output-text {
+  background: var(--vscode-editor-background);
+  color: var(--vscode-editor-foreground);
+  padding: 8px 12px;
+  border-radius: 3px;
+  border-left: 3px solid var(--vscode-editorGroup-border, #c0c0c0);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin-bottom: 6px;
+  max-height: 400px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  cursor: default;
+}
+
+.output-stderr {
+  background: var(--vscode-inputValidation-warningBackground);
+  color: var(--vscode-inputValidation-warningForeground, #e5c07b);
+  padding: 6px 10px;
+  border-radius: 3px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  margin-bottom: 6px;
+  max-height: 400px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  cursor: default;
+}
+
+.output-error {
+  background: var(--vscode-inputValidation-errorBackground);
+  color: var(--vscode-errorForeground, #e06c75);
+  padding: 6px 10px;
+  border-radius: 3px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  margin-bottom: 6px;
+  max-height: 400px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  cursor: default;
+}
+
+.plot-wrap {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  margin-bottom: 8px;
+}
+.output-plot {
+  display: block;
+  max-width: 100%;
+  border: 1px solid var(--vscode-editorGroup-border);
+  border-radius: 3px;
+}
+.plot-dl-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 3px 8px;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  border-radius: 3px;
+  font-size: 11px;
+  text-decoration: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.plot-wrap:hover .plot-dl-btn { opacity: 1; }
+
+/* ---- DataFrame viewer -------------------------------------------------- */
+/* Clean, borderless style — same visual weight as the plot image output */
+.df-viewer {
+  border: 1px solid var(--vscode-editorGroup-border);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 10px;
+  font-size: 12px;
+  background: var(--vscode-editor-background);
+}
+.df-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 10px;
+  /* no grey background — inherits editor background */
+  border-bottom: 1px solid var(--vscode-editorGroup-border);
+}
+.df-dims { color: var(--vscode-descriptionForeground); font-size: 11px; }
+.df-table-wrap { overflow-x: auto; max-height: 340px; overflow-y: auto; }
+.df-table { width: 100%; border-collapse: collapse; white-space: nowrap; }
+.df-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--vscode-editor-background);
+  /* box-shadow instead of border-bottom: stays visible during sticky scroll */
+  border-bottom: none;
+  box-shadow: 0 2px 0 var(--vscode-editorGroup-border, #c0c0c0);
+  /* vertical column separators */
+  border-right: 1px solid var(--vscode-editorGroup-border, #c0c0c0);
+  padding: 4px 10px;
+  text-align: left;
+  font-weight: 600;
+}
+.df-table thead th:last-child { border-right: none; }
+.df-table td {
+  padding: 3px 10px;
+  border-bottom: 1px solid var(--vscode-editorGroup-border);
+  border-right: 1px solid var(--vscode-editorGroup-border, #c0c0c0);
+}
+.df-table td:last-child { border-right: none; }
+.row-idx  { color: var(--vscode-descriptionForeground); font-size: 11px; }
+.na-value { color: var(--vscode-descriptionForeground); font-style: italic; }
+
+.df-paginator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  /* no grey background */
+  border-top: 1px solid var(--vscode-editorGroup-border);
+  font-size: 11px;
+}
+.df-paginator button {
+  background: none;
+  border: 1px solid var(--vscode-button-background);
+  color: var(--vscode-button-background);
+  border-radius: 3px;
+  padding: 2px 8px;
+  cursor: pointer;
+  font-size: 11px;
+}
+.df-paginator button:disabled { opacity: 0.4; cursor: not-allowed; }
+.df-paginator button:hover:not(:disabled) {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+.page-info { color: var(--vscode-descriptionForeground); margin-left: auto; }
+
+/* ---- Toast ------------------------------------------------------------- */
+.toast {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  padding: 8px 14px;
+  border-radius: 4px;
+  font-size: 12px;
+  max-width: 380px;
+  z-index: 9999;
+  animation: fadeIn 0.2s ease;
+}
+.toast-info { background: var(--vscode-notificationCenterHeader-background); }
+.toast-warn {
+  background: var(--vscode-inputValidation-warningBackground);
+  color: var(--vscode-inputValidation-warningForeground);
+}
+@keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; } }
+
+/* ---- Selected chunk (for toolbar add/delete) --------------------------- */
+/* Use outline so it coexists with box-shadow state rings (green/red/yellow) */
+.chunk-selected .chunk-code-block {
+  outline: 2px solid var(--vscode-focusBorder, #0078d4);
+  outline-offset: 1px;
+}
+
+/* ---- Split "+ Chunk" button -------------------------------------------- */
+.add-chunk-split {
+  display: inline-flex;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.add-chunk-split > button {
+  border-radius: 0;
+  border-right: 1px solid rgba(255,255,255,0.18);
+}
+.add-chunk-split > button:first-child { border-radius: 3px 0 0 3px; }
+.add-chunk-split > button:last-child  { border-radius: 0 3px 3px 0; border-right: none; padding: 4px 7px; font-size: 10px; }
+
+/* ---- Chunk-type dropdown (toolbar + lang badge) ------------------------- */
+.chunk-type-menu {
+  position: fixed;
+  z-index: 500;
+  background: var(--vscode-menu-background, var(--vscode-editorSuggestWidget-background, #252526));
+  border: 1px solid var(--vscode-menu-border, var(--vscode-editorGroup-border, #454545));
+  border-radius: 4px;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+  min-width: 140px;
+  overflow: hidden;
+  padding: 3px 0;
+}
+.chunk-type-item {
+  padding: 6px 14px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--vscode-menu-foreground, var(--vscode-editor-foreground));
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+.chunk-type-item:hover {
+  background: var(--vscode-list-activeSelectionBackground, #094771);
+  color: var(--vscode-list-activeSelectionForeground, #fff);
+}
+.chunk-type-item .cti-badge {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 8px;
+  min-width: 26px;
+  text-align: center;
+}
+.cti-check {
+  margin-left: auto;
+  padding-left: 10px;
+  color: #0078d4;
+  font-weight: 700;
+  min-width: 14px;
+}
+
+/* ---- Toolbar active toggle button -------------------------------------- */
+#toolbar button.btn-active {
+  background: var(--vscode-button-background);
+  outline: 1px solid var(--vscode-focusBorder, #007acc);
+  outline-offset: -1px;
+}
+
+/* ---- Output thumbnail strip (RStudio-style multi-output switcher) ------ */
+.output-thumb-strip {
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+  overflow-x: auto;
+  /* left padding so the first card's border/shadow isn't clipped */
+  padding: 8px 4px 8px 3px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--vscode-editorGroup-border, #c0c0c0);
+  scrollbar-width: thin;
+}
+.output-thumb-strip.output-thumb-strip-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 116px);
+  grid-auto-rows: 78px;
+  align-content: start;
+  overflow: auto;
+}
+.output-thumb {
+  flex-shrink: 0;
+  width: 116px;
+  height: 78px;
+  /* Keep consistent 2px border at all times to prevent layout shift on hover */
+  border: 2px solid var(--vscode-editorGroup-border, #c0c0c0);
+  border-radius: 4px;
+  cursor: pointer;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: var(--vscode-editor-background);
+  transition: border-color 0.12s, box-shadow 0.12s;
+  position: relative;
+}
+/* Hard-coded blue so hover is always visible regardless of VS Code theme */
+.output-thumb:hover {
+  border-color: #0078d4;
+  box-shadow: 0 0 0 2px rgba(0, 120, 212, 0.15);
+}
+.output-thumb.output-thumb-active {
+  border-color: #0078d4;
+  box-shadow: 0 0 0 3px rgba(0, 120, 212, 0.22);
+}
+.output-thumb.thumb-error {
+  border-color: #e06c75;
+}
+.output-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.thumb-icon {
+  font-size: 22px;
+  opacity: 0.5;
+  line-height: 1;
+  margin-bottom: 4px;
+}
+.thumb-err-icon { color: #e06c75; opacity: 0.8; }
+.thumb-label {
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground);
+  text-align: center;
+  padding: 0 4px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.thumb-text-preview {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 7.5px;
+  color: var(--vscode-editor-foreground);
+  flex: 1;
+  padding: 4px 6px 2px;
+  width: 100%;
+  overflow: hidden;
+  white-space: pre;
+  opacity: 0.65;
+}
+.thumb-stderr { opacity: 0.55; color: var(--vscode-inputValidation-warningForeground, #e5c07b); }
+.thumb-dims {
+  font-size: 9px;
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.7;
+  margin-top: 1px;
+}
+
+/* ============================================================
+   Variable Inspector Panel
+   ============================================================ */
+
+#var-panel {
+  display: none;                 /* hidden until toggled */
+  flex-direction: column;
+  width: 310px;
+  min-width: 220px;
+  max-width: 480px;
+  border-left: 1px solid var(--vscode-editorGroup-border, #c0c0c0);
+  background: var(--vscode-editorGroupHeader-tabsBackground);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+#var-panel.open { display: flex; }
+
+.var-panel-header {
+  display: flex;
+  align-items: center;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--vscode-editorGroup-border, #c0c0c0);
+  flex-shrink: 0;
+  gap: 6px;
+}
+.var-panel-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--vscode-descriptionForeground);
+  flex: 1;
+}
+.var-panel-header button {
+  background: none;
+  border: none;
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 2px 5px;
+  border-radius: 3px;
+}
+.var-panel-header button:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.15));
+  color: var(--vscode-foreground);
+}
+
+.var-panel-body {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: auto;
+}
+
+/* ---- Variable table (mirrors Jupyter variable inspector) ---------------- */
+.var-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.var-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--vscode-editorGroupHeader-tabsBackground);
+  box-shadow: 0 1px 0 var(--vscode-editorGroup-border, #c0c0c0);
+  padding: 5px 10px;
+  text-align: left;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--vscode-descriptionForeground);
+}
+.var-table tbody tr {
+  border-bottom: 1px solid var(--vscode-editorGroup-border, rgba(128,128,128,0.15));
+}
+.var-table tbody tr:hover {
+  background: var(--vscode-list-hoverBackground, rgba(128,128,128,0.08));
+}
+.var-table td {
+  padding: 4px 10px;
+  color: var(--vscode-editor-foreground);
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+/* Name column — bold, monospace */
+.var-table td:first-child {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-weight: 600;
+  color: var(--vscode-editor-foreground);
+}
+/* Type column — muted badge */
+.var-type-badge {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 8px;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+}
+/* Size column */
+.var-table td.var-size {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+}
+/* Value column — monospace preview */
+.var-table td.var-value {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+}
+/* Empty state */
+.var-empty {
+  text-align: center;
+  padding: 20px !important;
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+  font-size: 11px;
+}
+/* Spinning refresh animation on the ↻ button while loading */
+.var-panel-header button.refreshing { animation: spin 0.8s linear infinite; }

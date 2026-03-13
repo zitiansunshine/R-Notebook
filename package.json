@@ -1,0 +1,237 @@
+{
+  "name": "r-notebook",
+  "displayName": "R Notebook",
+  "description": "Native .Rmd and .ipynb support with inline console, plots, and paginated data frames",
+  "version": "1.0.0",
+  "publisher": "AndyWang",
+  "author": "Andy Wang",
+  "__metadata": {
+    "publisherDisplayName": "AndyWang"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zitiansunshine/R-Notebook"
+  },
+  "engines": { "vscode": "^1.85.0" },
+  "enabledApiProposals": [
+    "notebookKernelSource",
+    "notebookControllerAffinityHidden"
+  ],
+  "categories": ["Programming Languages", "Notebooks"],
+  "icon": "icon-enhance.png",
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onNotebook:rNotebook.rmarkdownNotebook",
+    "onNotebook:rNotebook.pythonNotebook",
+    "onCustomEditor:rNotebook.rmarkdownEditor",
+    "onLanguage:r",
+    "onLanguage:python"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "rmd",
+        "aliases": ["R Markdown", "RMarkdown", "rmarkdown"],
+        "extensions": [".Rmd", ".rmd"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "rmd",
+        "scopeName": "text.html.markdown.rmd",
+        "path": "./syntaxes/rmarkdown.tmLanguage.json",
+        "embeddedLanguages": {
+          "source.yaml":   "yaml",
+          "source.r":      "r",
+          "source.python": "python",
+          "source.shell":  "shellscript",
+          "source.sql":    "sql"
+        }
+      }
+    ],
+    "notebooks": [
+      {
+        "type": "rNotebook.rmarkdownNotebook",
+        "displayName": "R Notebook",
+        "selector": [
+          { "filenamePattern": "*.Rmd" },
+          { "filenamePattern": "*.rmd" }
+        ]
+      },
+      {
+        "type": "rNotebook.pythonNotebook",
+        "displayName": "Python Notebook",
+        "selector": [
+          { "filenamePattern": "*.ipynb" }
+        ]
+      }
+    ],
+    "customEditors": [
+      {
+        "viewType": "rNotebook.rmarkdownEditor",
+        "displayName": "R Notebook Editor",
+        "selector": [
+          { "filenamePattern": "*.Rmd" },
+          { "filenamePattern": "*.rmd" }
+        ],
+        "priority": "option"
+      }
+    ],
+    "notebookRenderer": [
+      {
+        "id": "rNotebook.execResultRenderer",
+        "displayName": "R Notebook Output Renderer",
+        "entrypoint": "./notebook/execResultRenderer.js",
+        "requiresMessaging": "optional",
+        "mimeTypes": [
+          "application/vnd.rnotebook.exec-result+json"
+        ]
+      }
+    ],
+    "commands": [
+      {
+        "command": "rNotebook.r.runChunk",
+        "title": "R: Run Current Chunk",
+        "category": "R Notebook"
+      },
+      {
+        "command": "rNotebook.r.runAll",
+        "title": "R: Run All Chunks",
+        "category": "R Notebook"
+      },
+      {
+        "command": "rNotebook.r.restartSession",
+        "title": "R: Restart Session",
+        "category": "R Notebook"
+      },
+      {
+        "command": "rNotebook.r.setCellFigureOptions",
+        "title": "R: Set Cell Figure Options (fig.width / fig.height / dpi)",
+        "category": "R Notebook"
+      },
+      {
+        "command": "rNotebook.notebook.interrupt",
+        "title": "Interrupt Kernel",
+        "category": "R Notebook",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "rNotebook.notebook.restart",
+        "title": "Restart Kernel",
+        "category": "R Notebook",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "rNotebook.py.setCellFigureOptions",
+        "title": "Python: Set Cell Figure Options (fig.width / fig.height / dpi)",
+        "category": "R Notebook"
+      },
+      {
+        "command": "rNotebook.notebook.showVariables",
+        "title": "Show Session Variables",
+        "category": "R Notebook",
+        "icon": "$(symbol-variable)"
+      }
+    ],
+    "menus": {
+      "notebook/toolbar": [
+        {
+          "command": "rNotebook.notebook.interrupt",
+          "when": "notebookType == rNotebook.rmarkdownNotebook || notebookType == rNotebook.pythonNotebook",
+          "group": "navigation@50"
+        },
+        {
+          "command": "rNotebook.notebook.restart",
+          "when": "notebookType == rNotebook.rmarkdownNotebook || notebookType == rNotebook.pythonNotebook",
+          "group": "navigation@51"
+        },
+        {
+          "command": "rNotebook.notebook.showVariables",
+          "when": "notebookType == rNotebook.rmarkdownNotebook || notebookType == rNotebook.pythonNotebook",
+          "group": "navigation@52"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "rNotebook.r.runChunk",
+        "key": "shift+enter",
+        "when": "activeCustomEditorId == rNotebook.rmarkdownEditor"
+      },
+      {
+        "command": "rNotebook.r.runAll",
+        "key": "ctrl+shift+enter",
+        "when": "activeCustomEditorId == rNotebook.rmarkdownEditor"
+      },
+      {
+        "command": "notebook.cell.executeAndSelectBelow",
+        "key": "shift+enter",
+        "when": "(notebookType == rNotebook.rmarkdownNotebook || notebookType == rNotebook.pythonNotebook) && notebookCellEditorFocused"
+      },
+      {
+        "command": "acceptSelectedSuggestion",
+        "key": "tab",
+        "when": "(notebookType == rNotebook.rmarkdownNotebook || notebookType == rNotebook.pythonNotebook) && notebookCellEditorFocused && suggestWidgetVisible"
+      },
+      {
+        "command": "editor.action.inlineSuggest.commit",
+        "key": "tab",
+        "when": "(notebookType == rNotebook.rmarkdownNotebook || notebookType == rNotebook.pythonNotebook) && notebookCellEditorFocused && inlineSuggestionVisible"
+      }
+    ],
+    "configuration": [
+      {
+        "title": "R Notebook R",
+        "properties": {
+          "rNotebook.r.rPath": {
+            "type": "string",
+            "default": "Rscript",
+            "description": "Default path to the Rscript executable used when a notebook has not selected a kernel yet"
+          },
+          "rNotebook.r.execTimeoutMs": {
+            "type": "number",
+            "default": 0,
+            "description": "Per-cell execution timeout for R in milliseconds (0 = no timeout)"
+          }
+        }
+      },
+      {
+        "title": "R Notebook Python",
+        "properties": {
+          "rNotebook.python.pythonPath": {
+            "type": "string",
+            "default": "python3",
+            "description": "Default Python executable used when a notebook has not selected a kernel yet"
+          },
+          "rNotebook.python.execTimeoutMs": {
+            "type": "number",
+            "default": 3000000,
+            "description": "Per-cell execution timeout for Python in milliseconds"
+          }
+        }
+      }
+    ]
+  },
+  "scripts": {
+    "build":            "node esbuild.js",
+    "build:prod":       "node esbuild.js --prod",
+    "watch":            "node esbuild.js --watch",
+    "typecheck":        "tsc -p tsconfig.json --noEmit",
+    "test":             "vitest run",
+    "test:unit":        "vitest run test/rmdParser.test.ts",
+    "test:integration": "vitest run test/rSessionManager.integration.test.ts",
+    "test:watch":       "vitest",
+    "package":          "vsce package"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.5",
+    "@vscode/vsce": "^2.26.0",
+    "esbuild": "^0.21.5",
+    "vitest": "^1.6.0",
+    "@vitest/coverage-v8": "^1.6.0"
+  }
+}

@@ -1,0 +1,259 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "R Markdown",
+  "scopeName": "text.html.markdown.rmd",
+  "fileTypes": ["Rmd", "rmd"],
+  "patterns": [
+    { "include": "#frontmatter" },
+    { "include": "#chunk-r" },
+    { "include": "#chunk-python" },
+    { "include": "#chunk-bash" },
+    { "include": "#chunk-sql" },
+    { "include": "#chunk-generic" },
+    { "include": "#inline-r" },
+    { "include": "#markdown" }
+  ],
+  "repository": {
+
+    "frontmatter": {
+      "name": "meta.embedded.block.yaml.frontmatter",
+      "begin": "\\A(---\\s*$)",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.frontmatter.begin.rmd" }
+      },
+      "end": "^(---|\\.\\.\\.)\\s*$",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.frontmatter.end.rmd" }
+      },
+      "contentName": "source.yaml",
+      "patterns": [
+        { "include": "source.yaml" }
+      ]
+    },
+
+    "chunk-r": {
+      "name": "meta.embedded.block.r",
+      "begin": "^(`{3,})\\{([Rr])(?:[,\\s][^}]*)?\\}\\s*$",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.fenced.rmd" },
+        "2": { "name": "entity.name.type.fenced.language.rmd" }
+      },
+      "end": "^\\1\\s*$",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.fenced.rmd" }
+      },
+      "contentName": "source.r",
+      "patterns": [
+        { "include": "source.r" }
+      ]
+    },
+
+    "chunk-python": {
+      "name": "meta.embedded.block.python",
+      "begin": "^(`{3,})\\{(python|Python)(?:[,\\s][^}]*)?\\}\\s*$",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.fenced.rmd" },
+        "2": { "name": "entity.name.type.fenced.language.rmd" }
+      },
+      "end": "^\\1\\s*$",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.fenced.rmd" }
+      },
+      "contentName": "source.python",
+      "patterns": [
+        { "include": "source.python" }
+      ]
+    },
+
+    "chunk-bash": {
+      "name": "meta.embedded.block.bash",
+      "begin": "^(`{3,})\\{(bash|sh|shell)(?:[,\\s][^}]*)?\\}\\s*$",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.fenced.rmd" },
+        "2": { "name": "entity.name.type.fenced.language.rmd" }
+      },
+      "end": "^\\1\\s*$",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.fenced.rmd" }
+      },
+      "contentName": "source.shell",
+      "patterns": [
+        { "include": "source.shell" }
+      ]
+    },
+
+    "chunk-sql": {
+      "name": "meta.embedded.block.sql",
+      "begin": "^(`{3,})\\{(sql|SQL)(?:[,\\s][^}]*)?\\}\\s*$",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.fenced.rmd" },
+        "2": { "name": "entity.name.type.fenced.language.rmd" }
+      },
+      "end": "^\\1\\s*$",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.fenced.rmd" }
+      },
+      "contentName": "source.sql",
+      "patterns": [
+        { "include": "source.sql" }
+      ]
+    },
+
+    "chunk-generic": {
+      "name": "meta.embedded.block.generic.rmd",
+      "begin": "^(`{3,})\\{(\\w+)(?:[,\\s][^}]*)?\\}\\s*$",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.fenced.rmd" },
+        "2": { "name": "entity.name.type.fenced.language.rmd" }
+      },
+      "end": "^\\1\\s*$",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.fenced.rmd" }
+      }
+    },
+
+    "inline-r": {
+      "name": "meta.embedded.inline.r",
+      "match": "(`r\\s+)([^`]+)(`)",
+      "captures": {
+        "1": { "name": "punctuation.definition.inline-r.begin.rmd" },
+        "2": {
+          "name": "source.r",
+          "patterns": [ { "include": "source.r" } ]
+        },
+        "3": { "name": "punctuation.definition.inline-r.end.rmd" }
+      }
+    },
+
+    "markdown": {
+      "patterns": [
+        { "include": "#heading" },
+        { "include": "#bold-italic" },
+        { "include": "#bold" },
+        { "include": "#italic" },
+        { "include": "#strikethrough" },
+        { "include": "#inline-code" },
+        { "include": "#link" },
+        { "include": "#image" },
+        { "include": "#blockquote" },
+        { "include": "#hr" },
+        { "include": "#list-item" },
+        { "include": "#html-tag" }
+      ]
+    },
+
+    "heading": {
+      "match": "^(#{1,6})\\s+(.+?)\\s*$",
+      "captures": {
+        "1": { "name": "punctuation.definition.heading.markdown" },
+        "2": { "name": "entity.name.section.markdown" }
+      }
+    },
+
+    "bold-italic": {
+      "name": "markup.bold.italic.markdown",
+      "match": "(\\*{3}|_{3})(?=\\S)(.+?)(?<=\\S)\\1",
+      "captures": {
+        "1": { "name": "punctuation.definition.bold.italic.markdown" },
+        "2": { "name": "markup.bold.italic.markdown" }
+      }
+    },
+
+    "bold": {
+      "name": "markup.bold.markdown",
+      "match": "(\\*{2}|_{2})(?=\\S)(.+?)(?<=\\S)\\1",
+      "captures": {
+        "1": { "name": "punctuation.definition.bold.markdown" },
+        "2": { "name": "markup.bold.markdown" }
+      }
+    },
+
+    "italic": {
+      "name": "markup.italic.markdown",
+      "match": "(\\*|_)(?=\\S)(.+?)(?<=\\S)\\1",
+      "captures": {
+        "1": { "name": "punctuation.definition.italic.markdown" },
+        "2": { "name": "markup.italic.markdown" }
+      }
+    },
+
+    "strikethrough": {
+      "name": "markup.strikethrough.markdown",
+      "match": "(~~)(.+?)(~~)",
+      "captures": {
+        "1": { "name": "punctuation.definition.strikethrough.markdown" },
+        "2": { "name": "markup.strikethrough.markdown" },
+        "3": { "name": "punctuation.definition.strikethrough.markdown" }
+      }
+    },
+
+    "inline-code": {
+      "name": "markup.inline.raw.string.markdown",
+      "match": "(`+)([^`]+)\\1",
+      "captures": {
+        "1": { "name": "punctuation.definition.raw.markdown" },
+        "2": { "name": "markup.inline.raw.string.markdown" }
+      }
+    },
+
+    "link": {
+      "name": "meta.link.inline.markdown",
+      "match": "(\\[)([^\\]]+)(\\])(?:(\\()([^\\)]+)(\\)))?",
+      "captures": {
+        "1": { "name": "punctuation.definition.link.begin.markdown" },
+        "2": { "name": "string.other.link.title.markdown" },
+        "3": { "name": "punctuation.definition.link.end.markdown" },
+        "4": { "name": "punctuation.definition.metadata.markdown" },
+        "5": { "name": "markup.underline.link.markdown" },
+        "6": { "name": "punctuation.definition.metadata.markdown" }
+      }
+    },
+
+    "image": {
+      "name": "meta.image.inline.markdown",
+      "match": "(!\\[)([^\\]]*)(\\])(?:(\\()([^\\)]+)(\\)))?",
+      "captures": {
+        "1": { "name": "punctuation.definition.image.begin.markdown" },
+        "2": { "name": "string.other.image.title.markdown" },
+        "3": { "name": "punctuation.definition.image.end.markdown" },
+        "4": { "name": "punctuation.definition.metadata.markdown" },
+        "5": { "name": "markup.underline.link.image.markdown" },
+        "6": { "name": "punctuation.definition.metadata.markdown" }
+      }
+    },
+
+    "blockquote": {
+      "name": "markup.quote.markdown",
+      "match": "^(>+)\\s+(.*)$",
+      "captures": {
+        "1": { "name": "punctuation.definition.quote.begin.markdown" },
+        "2": { "name": "markup.quote.markdown" }
+      }
+    },
+
+    "hr": {
+      "name": "meta.separator.markdown",
+      "match": "^(---+|\\*\\*\\*+|___+)\\s*$",
+      "captures": {
+        "0": { "name": "meta.separator.markdown" }
+      }
+    },
+
+    "list-item": {
+      "name": "markup.list.markdown",
+      "match": "^(\\s*)([-*+]|\\d+\\.)\\s+(.*)$",
+      "captures": {
+        "2": { "name": "punctuation.definition.list.begin.markdown" },
+        "3": { "name": "markup.list.markdown" }
+      }
+    },
+
+    "html-tag": {
+      "name": "meta.tag.html",
+      "match": "</?[a-zA-Z][^>]*>",
+      "captures": {
+        "0": { "name": "entity.name.tag.html" }
+      }
+    }
+  }
+}
