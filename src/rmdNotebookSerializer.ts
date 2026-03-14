@@ -26,6 +26,50 @@ type RmdCellMetadata = {
   optionStyle?: ChunkOptionStyle;
 };
 
+export function buildNotebookDataFromRmdText(text: string): vscode.NotebookData {
+  return new vscode.NotebookData(buildNotebookCellsFromRmdText(text));
+}
+
+export function buildNotebookCellsFromRmdText(text: string): vscode.NotebookCellData[] {
+  const { source, state } = splitRmdSourceAndState(text);
+  const chunks = parseRmd(source);
+  const restoredResults = restoreChunkResults(chunks, state);
+  const cells: vscode.NotebookCellData[] = [];
+
+  for (const chunk of chunks) {
+    if (chunk.kind === 'yaml_frontmatter') {
+      const cell = new vscode.NotebookCellData(
+        vscode.NotebookCellKind.Markup,
+        '```yaml\n' + chunk.code + '\n```',
+        'markdown',
+      );
+      cell.metadata = { kind: 'yaml_frontmatter' };
+      cells.push(cell);
+      continue;
+    }
+
+    if (chunk.kind === 'prose') {
+      cells.push(new vscode.NotebookCellData(
+        vscode.NotebookCellKind.Markup,
+        chunk.prose,
+        'markdown',
+      ));
+      continue;
+    }
+
+    const cell = new vscode.NotebookCellData(
+      vscode.NotebookCellKind.Code,
+      chunk.code,
+      chunk.language || 'r',
+    );
+    cell.metadata = { options: chunk.options, optionStyle: chunk.optionStyle };
+    cell.outputs = notebookOutputFromExecResult(restoredResults.get(chunk.id) ?? null, chunk.id);
+    cells.push(cell);
+  }
+
+  return cells;
+}
+
 export class RmdNotebookSerializer implements vscode.NotebookSerializer {
 
   async deserializeNotebook(
@@ -33,41 +77,7 @@ export class RmdNotebookSerializer implements vscode.NotebookSerializer {
     _token: vscode.CancellationToken,
   ): Promise<vscode.NotebookData> {
     const text = new TextDecoder().decode(content);
-    const { source, state } = splitRmdSourceAndState(text);
-    const chunks = parseRmd(source);
-    const restoredResults = restoreChunkResults(chunks, state);
-    const cells: vscode.NotebookCellData[] = [];
-
-    for (const chunk of chunks) {
-      if (chunk.kind === 'yaml_frontmatter') {
-        const cell = new vscode.NotebookCellData(
-          vscode.NotebookCellKind.Markup,
-          '```yaml\n' + chunk.code + '\n```',
-          'markdown',
-        );
-        cell.metadata = { kind: 'yaml_frontmatter' };
-        cells.push(cell);
-
-      } else if (chunk.kind === 'prose') {
-        cells.push(new vscode.NotebookCellData(
-          vscode.NotebookCellKind.Markup,
-          chunk.prose,
-          'markdown',
-        ));
-
-      } else {
-        const cell = new vscode.NotebookCellData(
-          vscode.NotebookCellKind.Code,
-          chunk.code,
-          chunk.language || 'r',
-        );
-        cell.metadata = { options: chunk.options, optionStyle: chunk.optionStyle };
-        cell.outputs = notebookOutputFromExecResult(restoredResults.get(chunk.id) ?? null, chunk.id);
-        cells.push(cell);
-      }
-    }
-
-    return new vscode.NotebookData(cells);
+    return buildNotebookDataFromRmdText(text);
   }
 
   async serializeNotebook(

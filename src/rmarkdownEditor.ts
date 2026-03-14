@@ -12,6 +12,7 @@ import {
   updateRConfigValue,
 } from './extensionIds';
 import { pickRKernelPath } from './kernelDiscovery';
+import { clearPersistedRmdOutputs, exportDocumentUri } from './notebookActions';
 import {
   buildPersistedRmdStateFromChunks,
   mergeRmdSourceAndState,
@@ -198,6 +199,45 @@ export class RMarkdownEditorProvider implements vscode.CustomTextEditorProvider 
             outputCache,
           );
           this.postMessage(panel, { type: 'session_reset' });
+          break;
+        }
+
+        case 'clear_outputs': {
+          const sourceText = typeof msg.fullText === 'string'
+            ? msg.fullText
+            : splitRmdSourceAndState(document.getText()).source;
+          outputCache.clear();
+          const nextText = clearPersistedRmdOutputs(sourceText);
+          const edit = new vscode.WorkspaceEdit();
+          edit.replace(
+            document.uri,
+            new vscode.Range(0, 0, document.lineCount, 0),
+            nextText,
+          );
+          await vscode.workspace.applyEdit(edit);
+          await document.save();
+          this.postMessage(panel, { type: 'outputs_cleared' });
+          break;
+        }
+
+        case 'export_document': {
+          const sourceText = typeof msg.fullText === 'string'
+            ? msg.fullText
+            : splitRmdSourceAndState(document.getText()).source;
+          const chunks = Array.isArray(msg.chunks) ? msg.chunks as RmdChunk[] : parseRmd(sourceText);
+          const nextText = mergeRmdSourceAndState(
+            sourceText,
+            buildPersistedRmdStateFromChunks(chunks, outputCache),
+          );
+          const edit = new vscode.WorkspaceEdit();
+          edit.replace(
+            document.uri,
+            new vscode.Range(0, 0, document.lineCount, 0),
+            nextText,
+          );
+          await vscode.workspace.applyEdit(edit);
+          await document.save();
+          await exportDocumentUri(document.uri);
           break;
         }
 
@@ -434,6 +474,8 @@ export class RMarkdownEditorProvider implements vscode.CustomTextEditorProvider 
 <body>
   <div id="toolbar">
     <button id="btn-run-all">▶ Run All</button>
+    <button id="btn-clear-outputs" title="Remove all saved outputs from this notebook">⌫ Clear Outputs</button>
+    <button id="btn-export" title="Export this notebook to HTML or PDF">⇪ Export</button>
     <button id="btn-interrupt" title="Interrupt running R code">⏹ Interrupt</button>
     <button id="btn-reset">↺ Restart R</button>
     <button id="btn-r-path" title="Set path to Rscript executable">⚙ R Path</button>

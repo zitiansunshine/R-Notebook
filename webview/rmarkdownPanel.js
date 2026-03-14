@@ -9,6 +9,8 @@
   const vscode      = acquireVsCodeApi();
   const container   = document.getElementById('rmd-container');
   const btnRunAll   = document.getElementById('btn-run-all');
+  const btnClearOutputs = document.getElementById('btn-clear-outputs');
+  const btnExport   = document.getElementById('btn-export');
   const btnInterrupt= document.getElementById('btn-interrupt');
   const btnReset    = document.getElementById('btn-reset');
   const btnRPath    = document.getElementById('btn-r-path');
@@ -186,6 +188,14 @@
         if (varPanelOpen) renderVarTable([]);
         break;
 
+      case 'outputs_cleared':
+        document.querySelectorAll('[data-chunk-id]').forEach(el => {
+          clearChunkOutput(el.dataset.chunkId);
+        });
+        activeOutputTabs.clear();
+        showToast('All saved outputs cleared.', 'ok');
+        break;
+
       case 'kernel_exit':
         setStatus('error');
         break;
@@ -228,6 +238,22 @@
       chunks: collectCurrentChunks(),
     });
     setStatus('running');
+  });
+
+  btnClearOutputs.addEventListener('click', () => {
+    vscode.postMessage({
+      type: 'clear_outputs',
+      fullText: reconstructFullText(),
+      chunks: collectCurrentChunks(),
+    });
+  });
+
+  btnExport.addEventListener('click', () => {
+    vscode.postMessage({
+      type: 'export_document',
+      fullText: reconstructFullText(),
+      chunks: collectCurrentChunks(),
+    });
   });
 
   btnInterrupt.addEventListener('click', () => {
@@ -1500,8 +1526,17 @@
     hrow.insertCell().textContent = '';
     for (const col of df.columns) {
       const th = document.createElement('th');
-      th.textContent = col.name;
-      th.title = col.type;
+      th.title = col.type || '';
+      const head = document.createElement('div');
+      head.className = 'df-col-head';
+      const name = document.createElement('span');
+      name.className = 'df-col-name';
+      name.textContent = col.name;
+      const type = document.createElement('span');
+      type.className = 'df-col-type';
+      type.textContent = `(${col.type || '?'})`;
+      head.append(name, type);
+      th.appendChild(head);
       hrow.appendChild(th);
     }
     const tbody = table.createTBody();

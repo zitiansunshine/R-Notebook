@@ -17,6 +17,8 @@ export const COMMAND_IDS = {
   notebookInterrupt: 'rNotebook.notebook.interrupt',
   notebookRestart: 'rNotebook.notebook.restart',
   notebookShowVariables: 'rNotebook.notebook.showVariables',
+  notebookClearOutputs: 'rNotebook.notebook.clearOutputs',
+  notebookExport: 'rNotebook.notebook.export',
 } as const;
 
 const R_CONFIG_SECTION = 'rNotebook.r';

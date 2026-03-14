@@ -7,7 +7,7 @@ import * as vscode from 'vscode';
 import { RMarkdownEditorProvider }                                     from './rmarkdownEditor';
 import { disposeSession, getAllSessions }                              from './rSessionManager';
 import { disposePySession, getAllPySessions }                          from './pySessionManager';
-import { RmdNotebookSerializer }                                       from './rmdNotebookSerializer';
+import { buildNotebookCellsFromRmdText, RmdNotebookSerializer }        from './rmdNotebookSerializer';
 import { IpynbSerializer }                                             from './ipynbSerializer';
 import { RNotebookController, NOTEBOOK_TYPE, registerFigureOptions }   from './rNotebookController';
 import { registerRNotebookCompletionProvider }                         from './rNotebookCompletionProvider';
@@ -15,6 +15,11 @@ import { RmdOutputStore }                                              from './r
 import { PyNotebookController, PY_NOTEBOOK_TYPE, registerPyFigureOptions } from './pyNotebookController';
 import { RNotebookVariableProvider }                                   from './variableProvider';
 import { forgetRNotebookKernel }                                       from './notebookKernelState';
+import {
+  cleanupClearedNotebookChange,
+  clearNotebookOutputs,
+  exportDocumentUri,
+} from './notebookActions';
 import {
   COMMAND_IDS,
   EXTENSION_BRAND,
@@ -26,6 +31,7 @@ import {
 let lastActiveNotebookUri: string | undefined;
 
 export function activate(ctx: vscode.ExtensionContext): void {
+  const syncingNotebookUrisFromText = new Set<string>();
 
   // ── Variable provider (VS Code 1.90+ native Variables panel) ────────────
   const varProvider = new RNotebookVariableProvider();
@@ -69,8 +75,21 @@ export function activate(ctx: vscode.ExtensionContext): void {
   ctx.subscriptions.push(
     vscode.window.onDidChangeActiveNotebookEditor((editor) => {
       rememberNotebookDocument(editor?.notebook);
+      void ensureRmdNotebookTextDocument(editor?.notebook);
+    }),
+    vscode.workspace.onDidOpenNotebookDocument((notebook) => {
+      void ensureRmdNotebookTextDocument(notebook);
+    }),
+    vscode.workspace.onDidChangeTextDocument((event) => {
+      void syncNotebookDocumentFromTextChange(event, syncingNotebookUrisFromText);
+    }),
+    vscode.workspace.onDidChangeNotebookDocument((event) => {
+      void cleanupClearedNotebookChange(event, rmdOutputStore);
     }),
   );
+  for (const notebook of vscode.workspace.notebookDocuments) {
+    void ensureRmdNotebookTextDocument(notebook);
+  }
 
   if (typeof vscode.notebooks.createRendererMessaging === 'function') {
     const rendererMessaging = vscode.notebooks.createRendererMessaging('rNotebook.execResultRenderer');
@@ -281,6 +300,49 @@ export function activate(ctx: vscode.ExtensionContext): void {
     }),
   );
 
+  ctx.subscriptions.push(
+    vscode.commands.registerCommand(COMMAND_IDS.notebookClearOutputs, async (target?: unknown) => {
+      const notebook = resolveNotebookDocument(target);
+      if (!notebook) {
+        vscode.window.showWarningMessage('Open an R Notebook, Quarto Notebook, or Python Notebook to clear outputs.');
+        return;
+      }
+      rememberNotebookDocument(notebook);
+
+      try {
+        const changed = await clearNotebookOutputs(notebook, rmdOutputStore);
+        vscode.window.showInformationMessage(
+          changed ? 'All outputs cleared and notebook saved.' : 'No outputs to clear.',
+        );
+      } catch (err: any) {
+        vscode.window.showErrorMessage(`Clearing outputs failed: ${err.message}`);
+      }
+    }),
+    vscode.commands.registerCommand(COMMAND_IDS.notebookExport, async (target?: unknown) => {
+      const notebook = resolveNotebookDocument(target);
+      const textDocument = resolveExportableTextDocument();
+
+      try {
+        if (notebook) {
+          rememberNotebookDocument(notebook);
+          await saveNotebookDocument(notebook);
+          await exportDocumentUri(notebook.uri);
+          return;
+        }
+
+        if (textDocument) {
+          await textDocument.save();
+          await exportDocumentUri(textDocument.uri);
+          return;
+        }
+
+        vscode.window.showWarningMessage('Open an .Rmd, .qmd, or .ipynb file to export it.');
+      } catch (err: any) {
+        vscode.window.showErrorMessage(`Export failed: ${err.message}`);
+      }
+    }),
+  );
+
 }
 
 export function deactivate(): void { /* sessions disposed per-document */ }
@@ -352,6 +414,137 @@ function managedNotebook(
 function isManagedNotebookDocument(notebook?: vscode.NotebookDocument): boolean {
   return notebook?.notebookType === NOTEBOOK_TYPE
     || notebook?.notebookType === PY_NOTEBOOK_TYPE;
+}
+
+async function ensureRmdNotebookTextDocument(
+  notebook?: vscode.NotebookDocument,
+): Promise<void> {
+  if (notebook?.notebookType !== NOTEBOOK_TYPE) return;
+  try {
+    await vscode.workspace.openTextDocument(notebook.uri);
+  } catch {
+    // Best effort only; the notebook can still function without the backing text
+    // document being open, but external edit syncing will be unavailable.
+  }
+}
+
+async function syncNotebookDocumentFromTextChange(
+  event: vscode.TextDocumentChangeEvent,
+  syncingNotebookUrisFromText: Set<string>,
+): Promise<void> {
+  const notebook = findNotebookByUri(event.document.uri.toString());
+  if (!notebook || notebook.notebookType !== NOTEBOOK_TYPE) return;
+  if (!isRmdLikeUri(event.document.uri)) return;
+
+  const notebookUri = notebook.uri.toString();
+  if (syncingNotebookUrisFromText.has(notebookUri)) return;
+
+  const nextCells = buildNotebookCellsFromRmdText(event.document.getText())
+    .map((cell) => stripCodeCellOutputs(cell));
+  if (notebookCellsMatch(notebook, nextCells)) return;
+
+  syncingNotebookUrisFromText.add(notebookUri);
+  try {
+    const edit = new vscode.WorkspaceEdit();
+    edit.set(notebook.uri, [
+      buildReplaceNotebookCellsEdit(notebook, nextCells),
+    ]);
+    await vscode.workspace.applyEdit(edit);
+  } finally {
+    syncingNotebookUrisFromText.delete(notebookUri);
+  }
+}
+
+function stripCodeCellOutputs(cell: vscode.NotebookCellData): vscode.NotebookCellData {
+  const next = new vscode.NotebookCellData(cell.kind, cell.value, cell.languageId);
+  next.metadata = cell.metadata as vscode.NotebookCellMetadata | undefined;
+  next.outputs = cell.kind === vscode.NotebookCellKind.Code ? [] : [...cell.outputs];
+  return next;
+}
+
+function buildReplaceNotebookCellsEdit(
+  notebook: vscode.NotebookDocument,
+  cells: readonly vscode.NotebookCellData[],
+): vscode.NotebookEdit {
+  const notebookEdit = vscode.NotebookEdit as typeof vscode.NotebookEdit & {
+    replaceCells?: (
+      range: vscode.NotebookRange,
+      newCells: readonly vscode.NotebookCellData[],
+    ) => vscode.NotebookEdit;
+  };
+  if (typeof notebookEdit.replaceCells !== 'function') {
+    throw new Error('Notebook replace API is unavailable in this editor build.');
+  }
+  return notebookEdit.replaceCells(
+    new vscode.NotebookRange(0, notebook.getCells().length),
+    cells,
+  );
+}
+
+function notebookCellsMatch(
+  notebook: vscode.NotebookDocument,
+  nextCells: readonly vscode.NotebookCellData[],
+): boolean {
+  const currentCells = notebook.getCells();
+  if (currentCells.length !== nextCells.length) return false;
+
+  for (let index = 0; index < currentCells.length; index += 1) {
+    const current = currentCells[index];
+    const next = nextCells[index];
+    if (current.kind !== next.kind) return false;
+    if (current.document.languageId !== next.languageId) return false;
+    if (current.document.getText() !== next.value) return false;
+    if (!notebookCellMetadataEqual(current.metadata, next.metadata)) return false;
+  }
+
+  return true;
+}
+
+function notebookCellMetadataEqual(
+  left: vscode.NotebookCellMetadata | undefined,
+  right: vscode.NotebookCellMetadata | undefined,
+): boolean {
+  return stableStringify(left ?? {}) === stableStringify(right ?? {});
+}
+
+function stableStringify(value: unknown): string {
+  return JSON.stringify(normalizeForComparison(value));
+}
+
+function normalizeForComparison(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => normalizeForComparison(entry));
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .filter(([, entry]) => entry !== undefined)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, entry]) => [key, normalizeForComparison(entry)]),
+    );
+  }
+  return value;
+}
+
+function isRmdLikeUri(uri: vscode.Uri): boolean {
+  const fsPath = uri.fsPath.toLowerCase();
+  return fsPath.endsWith('.rmd') || fsPath.endsWith('.qmd');
+}
+
+function resolveExportableTextDocument(): vscode.TextDocument | undefined {
+  const document = vscode.window.activeTextEditor?.document;
+  if (!document) return undefined;
+  const ext = document.uri.fsPath.toLowerCase();
+  if (ext.endsWith('.rmd') || ext.endsWith('.qmd') || ext.endsWith('.ipynb')) {
+    return document;
+  }
+  return undefined;
+}
+
+async function saveNotebookDocument(notebook: vscode.NotebookDocument): Promise<void> {
+  const savable = notebook as vscode.NotebookDocument & { save?: () => Thenable<boolean> };
+  if (typeof savable.save !== 'function') return;
+  await savable.save();
 }
 
 function buildConsoleTabHtml(chunkId: string, content: string): string {

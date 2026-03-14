@@ -359,7 +359,7 @@ export function buildDfViewerHtml(df: DataFrameResult): string {
     : '';
 
   const headerCells = df.columns
-    .map(c => `<th title="${esc(c.type)}">${esc(c.name)}</th>`)
+    .map(c => `<th title="${esc(c.type ?? '')}"><div class="df-col-head"><span class="df-col-name">${esc(c.name)}</span><span class="df-col-type">(${esc(c.type ?? '?')})</span></div></th>`)
     .join('');
 
   // Embed all available rows as JSON.  Replace '</' to prevent early
@@ -597,8 +597,27 @@ body {
   border-right: 1px solid var(--vscode-editorGroup-border, #c0c0c0);
   padding: 4px 10px;
   text-align: left; font-weight: 600;
+  vertical-align: bottom;
 }
 .df-table thead th:last-child { border-right: none; }
+.df-col-head {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+.df-col-name {
+  display: block;
+  line-height: 1.25;
+}
+.df-col-type {
+  display: block;
+  margin-top: 2px;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.2;
+  color: var(--vscode-descriptionForeground);
+}
 .df-table td {
   padding: 3px 10px;
   border-bottom: 1px solid var(--vscode-editorGroup-border);

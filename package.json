@@ -2,7 +2,7 @@
   "name": "r-notebook",
   "displayName": "R Notebook",
   "description": "Native .Rmd, .qmd, and .ipynb support with inline console, plots, and paginated data frames",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "publisher": "zitiansunsh1ne",
   "author": "Zitian(Andy)Wang",
   "__metadata": {
@@ -23,6 +23,8 @@
     "onCommand:rNotebook.notebook.interrupt",
     "onCommand:rNotebook.notebook.restart",
     "onCommand:rNotebook.notebook.showVariables",
+    "onCommand:rNotebook.notebook.clearOutputs",
+    "onCommand:rNotebook.notebook.export",
     "onLanguage:r",
     "onLanguage:python"
   ],
@@ -135,6 +137,18 @@
         "title": "Show Session Variables",
         "category": "R Notebook",
         "icon": "$(symbol-variable)"
+      },
+      {
+        "command": "rNotebook.notebook.clearOutputs",
+        "title": "Clear All Outputs",
+        "category": "R Notebook",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "rNotebook.notebook.export",
+        "title": "Export",
+        "category": "R Notebook",
+        "icon": "$(export)"
       }
     ],
     "menus": {
@@ -153,6 +167,11 @@
           "command": "rNotebook.notebook.showVariables",
           "when": "notebookType == rNotebook.rmarkdownNotebook || notebookType == rNotebook.pythonNotebook",
           "group": "navigation@52"
+        },
+        {
+          "command": "rNotebook.notebook.export",
+          "when": "notebookType == rNotebook.rmarkdownNotebook || notebookType == rNotebook.pythonNotebook",
+          "group": "navigation@53"
         }
       ]
     },
