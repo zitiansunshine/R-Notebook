@@ -32,9 +32,18 @@ export function buildOutputHtml(
   chunkId: string,
   options: BuildOutputHtmlOptions = {},
 ): string | null {
+  const body = buildOutputFragment(result, chunkId, options);
+  return body ? wrapHtml(body) : null;
+}
+
+export function buildOutputFragment(
+  result: ExecResult,
+  chunkId: string,
+  options: BuildOutputHtmlOptions = {},
+): string | null {
   // When running but no stream outputs yet, show just the live console.
   if (options.running && !(result.output_order?.length)) {
-    return wrapHtml(renderLiveConsoleHtml(result));
+    return renderLiveConsoleHtml(result);
   }
 
   const tabs: OutputTab[] = [];
@@ -49,15 +58,13 @@ export function buildOutputHtml(
     tabs.push({ type: 'error', content: result.error });
 
   if (tabs.length === 0) {
-    if (options.running) return wrapHtml(renderLiveConsoleHtml(result));
+    if (options.running) return renderLiveConsoleHtml(result);
     return null;
   }
 
-  const body = tabs.length === 1
+  return tabs.length === 1
     ? renderSingleOutputHtml(tabs[0])
     : renderTabsHtml(tabs, chunkId);
-
-  return wrapHtml(body);
 }
 
 export function buildErrorHtml(message: string): string {

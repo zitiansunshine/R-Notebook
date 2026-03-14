@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.2.1
+- Fixed bugs
+
 ## 1.2.0
 - Added dataframe column type labels to `.Rmd`, `.qmd`, and `.ipynb` outputs
 - Fixed bugs
