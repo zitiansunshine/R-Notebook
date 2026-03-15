@@ -12,10 +12,17 @@ export const RAW_EXEC_RESULT_MIME = 'application/vnd.rnotebook.exec-result+json'
 export class RmdOutputStore {
   private readonly results = new Map<string, Map<string, ExecResult>>();
   private readonly states = new Map<string, StoredExecResultState[]>();
+  private readonly hardResetUris = new Set<string>();
+
+  markHardReset(docUri: string): void {
+    this.clear(docUri);
+    this.hardResetUris.add(docUri);
+  }
 
   applyNotebookChange(event: vscode.NotebookDocumentChangeEvent): void {
     const docUri = event.notebook.uri.toString();
     const next = new Map(this.results.get(docUri) ?? []);
+    const suppressTransfer = this.hardResetUris.delete(docUri);
 
     for (const contentChange of event.contentChanges) {
       const removedStates: StoredExecResultState[] = [];
@@ -23,16 +30,18 @@ export class RmdOutputStore {
       for (const cell of contentChange.removedCells) {
         if (cell.kind !== vscode.NotebookCellKind.Code) continue;
         const cellDocUri = cell.document.uri.toString();
-        removedStates.push({
-          fingerprint: fingerprintNotebookCodeCell(
-            cell.document.languageId,
-            cell.document.getText(),
-            ((cell.metadata ?? {}) as { options?: Record<string, unknown> }).options,
-          ),
-          result: normalizePersistedExecResult(
-            next.get(cellDocUri) ?? execResultFromCellOutputs(cell.outputs),
-          ),
-        });
+        if (!suppressTransfer) {
+          removedStates.push({
+            fingerprint: fingerprintNotebookCodeCell(
+              cell.document.languageId,
+              cell.document.getText(),
+              ((cell.metadata ?? {}) as { options?: Record<string, unknown> }).options,
+            ),
+            result: normalizePersistedExecResult(
+              next.get(cellDocUri) ?? execResultFromCellOutputs(cell.outputs),
+            ),
+          });
+        }
         next.delete(cellDocUri);
       }
 

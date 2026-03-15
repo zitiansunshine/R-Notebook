@@ -47,4 +47,4 @@ npm run build
 npm run package
 ```
 
-Version `1.1.0` packages into the project root as `r-notebook-1.1.0.vsix`.
+Version `1.2.2` packages into the project root as `r-notebook-1.2.2.vsix`.

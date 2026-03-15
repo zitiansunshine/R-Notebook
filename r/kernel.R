@@ -179,6 +179,11 @@ capture_output <- function(expr_text, progress_cb = NULL, stream_cb = NULL,
             inline_order <- c(inline_order, list(list(type = "df", index = idx, name = nm)))
             if (!is.null(df_cb)) tryCatch(df_cb(serialized, idx), error = function(e) NULL)
           }
+        } else if (is.list(vis$value) && should_use_compact_summary(vis$value)) {
+          # Large list-like objects can take a very long time to recursively
+          # walk or serialise. Show a compact summary instead so follow-up
+          # inspection cells stay responsive.
+          cat(compact_object_summary_line(vis$value), "\n", sep = "")
         } else if (is_plain_list(vis$value)) {
           visible_outputs <- tryCatch(
             collect_visible_outputs(vis$value, nm),
@@ -210,8 +215,9 @@ capture_output <- function(expr_text, progress_cb = NULL, stream_cb = NULL,
               }
             }
           } else {
-            # Plain list with no displayable items: auto-print.
-            tryCatch(print(vis$value), error = function(e) NULL)
+            # Plain list with no displayable items: use the structured list
+            # renderer so large objects do not stall the kernel on raw print().
+            print_display_aware_list(vis$value)
           }
         } else if (is_renderable_plot_object(vis$value)) {
           b64 <- render_plot_to_b64(vis$value, fig_w, fig_h, fig_dpi)

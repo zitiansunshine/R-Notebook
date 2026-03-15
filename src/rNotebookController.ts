@@ -35,6 +35,7 @@ import {
   RAW_EXEC_RESULT_MIME,
   RmdOutputStore,
 } from './rmdOutputStore';
+import { hasPersistedRmdState } from './rmdPersistedState';
 import type { VariableNotifier } from './pyNotebookController';
 
 export const NOTEBOOK_TYPE = R_NOTEBOOK_TYPE;
@@ -83,9 +84,7 @@ export class RNotebookController {
     this.disposables.push(
       vscode.workspace.onDidOpenNotebookDocument((notebook) => {
         if (notebook.notebookType !== NOTEBOOK_TYPE) return;
-        this.outputStore.syncNotebook(notebook);
-        this.syncNotebookAffinities(notebook);
-        void this.restoreNotebookOutputs(notebook);
+        void this.prepareOpenedNotebook(notebook);
       }),
       vscode.workspace.onDidChangeNotebookDocument((event) => {
         if (event.notebook.notebookType !== NOTEBOOK_TYPE) return;
@@ -519,11 +518,22 @@ export class RNotebookController {
     const docUri = notebook.uri.toString();
     const descriptor = this.resolveDescriptorForNotebook(notebook);
     const session = getOrCreateSession(docUri, descriptor.rPath, this.execTimeoutMs());
+    this.bumpQueueEpoch(docUri);
+    this.clearLiveExecutionState(docUri);
     session.setExecutablePath(descriptor.rPath);
     this.bindSession(docUri, session);
     await session.restart();
     this.varNotifier?.notifyChanged(notebook);
     return true;
+  }
+
+  private clearLiveExecutionState(docUri: string): void {
+    for (const [liveKey, state] of this.liveExecutions) {
+      if (!liveKey.startsWith(`${docUri}::`)) continue;
+      this.liveExecutions.delete(liveKey);
+      this.liveCellDocuments.delete(state.cellDocUri);
+      this.deletedLiveCellDocuments.delete(state.cellDocUri);
+    }
   }
 
   private bindSession(docUri: string, session: ReturnType<typeof getOrCreateSession>): void {
@@ -756,6 +766,26 @@ export class RNotebookController {
   private shouldRestoreNotebookOutputs(event: vscode.NotebookDocumentChangeEvent): boolean {
     if (event.contentChanges.length > 0) return true;
     return event.cellChanges.some((change) => Boolean(change.document || change.metadata));
+  }
+
+  private async prepareOpenedNotebook(notebook: vscode.NotebookDocument): Promise<void> {
+    const docUri = notebook.uri.toString();
+    try {
+      const textDocument = await vscode.workspace.openTextDocument(notebook.uri);
+      const hasPersistedState = hasPersistedRmdState(textDocument.getText());
+      const hasVisibleOutputs = notebook.getCells().some((cell) =>
+        cell.kind === vscode.NotebookCellKind.Code && cell.outputs.length > 0,
+      );
+      if (!hasPersistedState && !hasVisibleOutputs) {
+        this.outputStore.clear(docUri);
+      }
+    } catch {
+      // Best effort only. If the backing text document is unavailable, fall back
+      // to the existing in-memory output state.
+    }
+    this.outputStore.syncNotebook(notebook);
+    this.syncNotebookAffinities(notebook);
+    await this.restoreNotebookOutputs(notebook);
   }
 
   private async refreshVariableCache(

@@ -20,6 +20,8 @@ interface PendingRequest {
   timeout: ReturnType<typeof setTimeout> | undefined;
 }
 
+const IDLE_CHECKPOINT_DELAY_MS = 10_000;
+
 function sanitizeExecTimeoutMs(timeoutMs?: number): number {
   if (typeof timeoutMs === 'number' && timeoutMs === 0) return 0;
   return typeof timeoutMs === 'number' && Number.isFinite(timeoutMs) && timeoutMs > 0
@@ -49,6 +51,8 @@ export class RSession extends EventEmitter {
   private hasCheckpoint = false;
   private checkpointingDisabled = false;
   private recoveryPromise: Promise<void> | null = null;
+  private checkpointTimer: ReturnType<typeof setTimeout> | null = null;
+  private checkpointPromise: Promise<void> | null = null;
 
   /** exec_timeout_ms: per-chunk max execution time */
   constructor(
@@ -91,6 +95,7 @@ export class RSession extends EventEmitter {
   }
 
   async stop(): Promise<void> {
+    this.clearScheduledCheckpoint();
     this.lastVars = { type: 'vars_result', vars: [] };
     this.workspaceDirty = false;
     this.hasCheckpoint = false;
@@ -100,6 +105,7 @@ export class RSession extends EventEmitter {
   }
 
   async restart(): Promise<void> {
+    this.clearScheduledCheckpoint();
     this.lastVars = { type: 'vars_result', vars: [] };
     this.workspaceDirty = false;
     this.hasCheckpoint = false;
@@ -160,7 +166,6 @@ export class RSession extends EventEmitter {
     opts?: { fig_width?: number; fig_height?: number; dpi?: number },
   ): Promise<ExecResult> {
     await this.start();
-    await this.ensureWorkspaceCheckpoint();
     const req: KernelRequest = {
       type: 'exec',
       chunk_id: chunkId,
@@ -175,6 +180,7 @@ export class RSession extends EventEmitter {
       const result = await this.sendWait(req, chunkId, this.execTimeoutMs) as ExecResult;
       if (!result.error && !this.checkpointingDisabled) {
         this.workspaceDirty = true;
+        this.scheduleWorkspaceCheckpoint();
       }
       return result;
     } finally {
@@ -226,6 +232,7 @@ export class RSession extends EventEmitter {
   private async startProcess(): Promise<void> {
     if (this.started && this.activeBin === this.requestedBin) return;
     if (this.started) await this.stopProcess(new Error('Session restarted'));
+    this.clearScheduledCheckpoint();
 
     const myId = ++this.procId;
     const spawnBin = this.requestedBin;
@@ -285,6 +292,7 @@ export class RSession extends EventEmitter {
   }
 
   private async stopProcess(reason: Error): Promise<void> {
+    this.clearScheduledCheckpoint();
     if (!this.proc) {
       this.started = false;
       this.activeBin = undefined;
@@ -358,42 +366,79 @@ export class RSession extends EventEmitter {
 
   private async ensureWorkspaceCheckpoint(): Promise<void> {
     if (!this.workspaceDirty || this.checkpointingDisabled) return;
+    if (this.activeExecKey || this.recoveryPromise) return;
+    if (this.checkpointPromise) return this.checkpointPromise;
 
-    let snapshot: any;
-    try {
-      snapshot = await this.sendWait(
-        { type: 'snapshot', checkpoint_path: this.checkpointPath },
-        '__snapshot__',
-        this.restoreTimeoutMs(),
-      ) as any;
-    } catch {
+    const snapshotTask = (async () => {
+      let snapshot: any;
+      try {
+        snapshot = await this.sendWait(
+          { type: 'snapshot', checkpoint_path: this.checkpointPath },
+          '__snapshot__',
+          this.restoreTimeoutMs(),
+        ) as any;
+      } catch {
+        this.disableCheckpointing();
+        return;
+      }
+
+      if (snapshot?.had_state === false) {
+        this.workspaceDirty = false;
+        this.hasCheckpoint = false;
+        this.checkpointingDisabled = false;
+        this.deleteCheckpointFile();
+        return;
+      }
+
+      if (snapshot?.captured) {
+        this.workspaceDirty = false;
+        this.hasCheckpoint = true;
+        this.checkpointingDisabled = false;
+        return;
+      }
+
       this.disableCheckpointing();
-      return;
-    }
+    })();
 
-    if (snapshot?.had_state === false) {
-      this.workspaceDirty = false;
-      this.hasCheckpoint = false;
-      this.checkpointingDisabled = false;
-      this.deleteCheckpointFile();
-      return;
-    }
-
-    if (snapshot?.captured) {
-      this.workspaceDirty = false;
-      this.hasCheckpoint = true;
-      this.checkpointingDisabled = false;
-      return;
-    }
-
-    this.disableCheckpointing();
+    let trackedTask: Promise<void>;
+    trackedTask = snapshotTask.finally(() => {
+      if (this.checkpointPromise === trackedTask) {
+        this.checkpointPromise = null;
+      }
+      if (this.workspaceDirty && !this.checkpointingDisabled && !this.activeExecKey && !this.recoveryPromise) {
+        this.scheduleWorkspaceCheckpoint();
+      }
+    });
+    this.checkpointPromise = trackedTask;
+    return trackedTask;
   }
 
   private disableCheckpointing(): void {
+    this.clearScheduledCheckpoint();
     this.workspaceDirty = false;
     this.hasCheckpoint = false;
     this.checkpointingDisabled = true;
     this.deleteCheckpointFile();
+  }
+
+  private scheduleWorkspaceCheckpoint(delayMs = IDLE_CHECKPOINT_DELAY_MS): void {
+    if (!this.workspaceDirty || this.checkpointingDisabled) return;
+    if (this.checkpointTimer) clearTimeout(this.checkpointTimer);
+    this.checkpointTimer = setTimeout(() => {
+      this.checkpointTimer = null;
+      if (this.activeExecKey || this.recoveryPromise || !this.started) {
+        this.scheduleWorkspaceCheckpoint(delayMs);
+        return;
+      }
+      void this.ensureWorkspaceCheckpoint();
+    }, delayMs);
+  }
+
+  private clearScheduledCheckpoint(): void {
+    if (this.checkpointTimer) {
+      clearTimeout(this.checkpointTimer);
+      this.checkpointTimer = null;
+    }
   }
 
   private deleteCheckpointFile(): void {
@@ -590,6 +635,11 @@ export class RSession extends EventEmitter {
 
 const sessions = new Map<string, RSession>();
 
+function checkpointPathForDocUri(docUri: string): string {
+  const checkpointId = crypto.createHash('sha1').update(docUri).digest('hex');
+  return path.join(os.tmpdir(), 'r-notebook-checkpoints', `${checkpointId}.rds`);
+}
+
 export function getOrCreateSession(
   docUri: string,
   rBin?: string,
@@ -611,6 +661,15 @@ export async function disposeSession(docUri: string): Promise<void> {
   if (s) {
     await s.stop();
     sessions.delete(docUri);
+  }
+}
+
+export async function purgeSessionState(docUri: string): Promise<void> {
+  await disposeSession(docUri);
+  try {
+    fs.unlinkSync(checkpointPathForDocUri(docUri));
+  } catch {
+    // Ignore missing checkpoint files.
   }
 }
 

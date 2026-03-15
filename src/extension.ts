@@ -5,7 +5,7 @@
 import * as vscode from 'vscode';
 
 import { RMarkdownEditorProvider }                                     from './rmarkdownEditor';
-import { disposeSession, getAllSessions }                              from './rSessionManager';
+import { getAllSessions, purgeSessionState }                           from './rSessionManager';
 import { disposePySession, getAllPySessions }                          from './pySessionManager';
 import { buildNotebookCellsFromRmdText, RmdNotebookSerializer }        from './rmdNotebookSerializer';
 import { IpynbSerializer }                                             from './ipynbSerializer';
@@ -87,6 +87,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
       void cleanupClearedNotebookChange(event, rmdOutputStore);
     }),
   );
+  registerNotebookStateWatchers(ctx, rmdOutputStore);
   for (const notebook of vscode.workspace.notebookDocuments) {
     void ensureRmdNotebookTextDocument(notebook);
   }
@@ -349,8 +350,8 @@ export function deactivate(): void { /* sessions disposed per-document */ }
 
 function resolveNotebookDocument(target?: unknown): vscode.NotebookDocument | undefined {
   return resolveNotebookTarget(target)
-    ?? findNotebookByUri(lastActiveNotebookUri)
     ?? managedNotebook(vscode.window.activeNotebookEditor?.notebook)
+    ?? findNotebookByUri(lastActiveNotebookUri)
     ?? vscode.window.visibleNotebookEditors
       .map((editor) => editor.notebook)
       .find((notebook) => isManagedNotebookDocument(notebook))
@@ -539,6 +540,37 @@ function resolveExportableTextDocument(): vscode.TextDocument | undefined {
     return document;
   }
   return undefined;
+}
+
+function registerNotebookStateWatchers(
+  ctx: vscode.ExtensionContext,
+  rmdOutputStore: RmdOutputStore,
+): void {
+  const patterns = ['**/*.Rmd', '**/*.rmd', '**/*.Qmd', '**/*.qmd', '**/*.ipynb'];
+  const handleUri = (uri: vscode.Uri) => {
+    void purgeNotebookUriState(uri, rmdOutputStore);
+  };
+
+  for (const pattern of patterns) {
+    const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+    ctx.subscriptions.push(
+      watcher,
+      watcher.onDidDelete(handleUri),
+      watcher.onDidCreate(handleUri),
+    );
+  }
+}
+
+async function purgeNotebookUriState(
+  uri: vscode.Uri,
+  rmdOutputStore: RmdOutputStore,
+): Promise<void> {
+  const docUri = uri.toString();
+  rmdOutputStore.markHardReset(docUri);
+  forgetRNotebookKernel(docUri);
+  await purgeSessionState(docUri);
+  await disposePySession(docUri);
+  if (lastActiveNotebookUri === docUri) lastActiveNotebookUri = undefined;
 }
 
 async function saveNotebookDocument(notebook: vscode.NotebookDocument): Promise<void> {

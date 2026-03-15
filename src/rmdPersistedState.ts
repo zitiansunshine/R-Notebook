@@ -9,8 +9,13 @@ import {
 } from './rmdResultMapping';
 
 const STATE_MARKER = 'RNOTEBOOK_RMD_STATE';
+const LEGACY_STATE_MARKERS = [
+  STATE_MARKER,
+  'R_NOTEBOOK_RMD_STATE',
+  'NOTA_RMD_STATE',
+] as const;
 const STATE_BLOCK_RE = new RegExp(
-  String.raw`(?:\r?\n)?<!--\s*${STATE_MARKER}\s+([A-Za-z0-9+/=]+)\s*-->\s*$`,
+  String.raw`(?:\r?\n)?<!--\s*(${LEGACY_STATE_MARKERS.map(escapeRegExp).join('|')})(?:\s+([A-Za-z0-9+/=]+))?\s*-->\s*$`,
 );
 
 export interface PersistedRmdState {
@@ -27,14 +32,11 @@ export function splitRmdSourceAndState(text: string): {
   source: string;
   state: PersistedRmdState;
 } {
-  const match = text.match(STATE_BLOCK_RE);
-  if (!match || match.index == null) {
-    return { source: text, state: emptyState() };
-  }
+  const { source, payload } = stripTrailingStateBlocks(text);
+  if (!payload) return { source, state: emptyState() };
 
-  const source = text.slice(0, match.index);
   try {
-    const decoded = Buffer.from(match[1], 'base64').toString('utf8');
+    const decoded = Buffer.from(payload, 'base64').toString('utf8');
     return { source, state: normalizePersistedState(JSON.parse(decoded)) };
   } catch {
     return { source, state: emptyState() };
@@ -45,13 +47,30 @@ export function mergeRmdSourceAndState(
   source: string,
   state: PersistedRmdState,
 ): string {
-  const base = splitRmdSourceAndState(source).source;
+  const { source: base } = stripTrailingStateBlocks(source);
   const normalized = normalizePersistedState(state);
   if (!normalized.codeCellStates.some((entry) => entry.result)) return base;
 
   const payload = Buffer.from(JSON.stringify(normalized), 'utf8').toString('base64');
   const separator = base.length === 0 || base.endsWith('\n') ? '' : '\n';
   return `${base}${separator}<!-- ${STATE_MARKER} ${payload} -->\n`;
+}
+
+function stripTrailingStateBlocks(text: string): { source: string; payload?: string } {
+  let source = text;
+  let payload: string | undefined;
+
+  while (true) {
+    const match = source.match(STATE_BLOCK_RE);
+    if (!match || match.index == null) return { source, payload };
+    if (!payload && match[2]) payload = match[2];
+    source = source.slice(0, match.index);
+  }
+}
+
+export function hasPersistedRmdState(text: string): boolean {
+  const { source } = stripTrailingStateBlocks(text);
+  return source !== text;
 }
 
 export function buildPersistedRmdStateFromChunks(
@@ -149,4 +168,8 @@ function isExecResult(value: unknown): value is ExecResult {
     Array.isArray(candidate.dataframes) &&
     (candidate.plots_html === undefined || Array.isArray(candidate.plots_html))
   );
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
