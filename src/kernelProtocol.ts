@@ -102,6 +102,8 @@ export interface ExecResult {
    */
   output_order?: Array<{ type: 'df' | 'plot'; index: number; name?: string }>;
   error: string | null;
+  /** Optional R traceback for error output. */
+  error_trace?: string | null;
 }
 
 export interface DfDataResult extends DataFrameResult {

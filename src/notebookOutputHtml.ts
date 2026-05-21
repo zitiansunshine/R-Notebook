@@ -55,7 +55,7 @@ export function buildOutputFragment(
 
   tabs.push(...collectMediaTabs(result));
   if (result.error)
-    tabs.push({ type: 'error', content: result.error });
+    tabs.push({ type: 'error', content: buildErrorText(result) });
 
   if (tabs.length === 0) {
     if (options.running) return renderLiveConsoleHtml(result);
@@ -114,6 +114,14 @@ function buildConsoleText(
   const parts = [result.stdout ?? '', result.stderr ?? '']
     .filter(part => part.trim().length > 0);
   return parts.join(parts.length > 1 ? '\n' : '');
+}
+
+function buildErrorText(result: Pick<ExecResult, 'error' | 'error_trace'>): string {
+  const error = String(result.error ?? '').trim();
+  const trace = String(result.error_trace ?? '').trim();
+  if (!trace || trace === error) return error;
+  if (trace.startsWith(error)) return trace;
+  return `${error}\n\n${trace}`;
 }
 
 function collectMediaTabs(result: ExecResult): OutputTab[] {
@@ -377,26 +385,29 @@ export function buildDfViewerHtml(df: DataFrameResult): string {
   // The paginator script uses globally-named callbacks so onclick= attributes
   // (evaluated in window scope) can call them without closures.
   const script = `(function(){
-var R=${rowsJson},RN=${rowNamesJson},N=${nrow},Z=50,T=Math.ceil(R.length/Z);
-function eh(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
-function draw(p){
-  if(T===0){
+	var R=${rowsJson},RN=${rowNamesJson},N=${nrow},Z=50,T=Math.ceil(R.length/Z),S=null;
+	function eh(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+	function draw(p){
+	  if(T===0){
     document.getElementById('${uid}-body').innerHTML='<tr><td colspan="100" class="na-value">No data</td></tr>';
     document.getElementById('${uid}-info').textContent='0 rows';
     document.getElementById('${uid}-pg').innerHTML='';
     return;
   }
-  var s=p*Z,sl=R.slice(s,Math.min(s+Z,R.length));
-  document.getElementById('${uid}-body').innerHTML=sl.map(function(row,i){
-    var rowName=RN[s+i] != null ? RN[s+i] : String(s+i+1);
-    return'<tr><td class="row-idx">'+eh(String(rowName))+'</td>'+
-      Object.values(row).map(function(v){
-        return v==null?'<td class="na-value">NA</td>':'<td>'+eh(String(v))+'</td>';
-      }).join('')+'</tr>';
-  }).join('');
-  var r1=p*Z+1,r2=Math.min((p+1)*Z,N);
-  document.getElementById('${uid}-info').textContent=
-    'Rows '+r1+'\u2013'+r2+' of '+N.toLocaleString()+
+	  var s=p*Z,sl=R.slice(s,Math.min(s+Z,R.length));
+	  document.getElementById('${uid}-body').innerHTML=sl.map(function(row,i){
+    var ri=s+i;
+	    var rowName=RN[s+i] != null ? RN[s+i] : String(s+i+1);
+    var sel=S===ri?' class="df-row-selected" aria-selected="true"':' aria-selected="false"';
+	    return'<tr data-row-index="'+ri+'" tabindex="0"'+sel+'><td class="row-idx">'+eh(String(rowName))+'</td>'+
+	      Object.values(row).map(function(v){
+	        return v==null?'<td class="na-value">NA</td>':'<td>'+eh(String(v))+'</td>';
+	      }).join('')+'</tr>';
+	  }).join('');
+  mark();
+	  var r1=p*Z+1,r2=Math.min((p+1)*Z,N);
+	  document.getElementById('${uid}-info').textContent=
+	    'Rows '+r1+'\u2013'+r2+' of '+N.toLocaleString()+
     (R.length<N?' ('+R.length.toLocaleString()+' loaded)':'');
   pager(p);
 }
@@ -412,19 +423,34 @@ function pager(p){
     else if(c>=t-5){a.push(0);a.push(-1);for(var i=t-6;i<t;i++)a.push(i);}
     else{a.push(0);a.push(-1);for(var i=c-1;i<=c+1;i++)a.push(i);a.push(-1);a.push(t-1);}
     return a;
-  }
-  var h=btn('&#9668;&nbsp;Prev',p-1,p===0,false);
-  nums(p,T).forEach(function(n){
-    h+=n<0?'<span class="pg-ellipsis">&#8230;<\\/span>':btn(n+1,n,false,n===p);
-  });
+	  }
+	  var h=btn('&#9668;&nbsp;Prev',p-1,p===0,false);
+	  nums(p,T).forEach(function(n){
+	    h+=n<0?'<span class="pg-ellipsis">&#8230;<\\/span>':btn(n+1,n,false,n===p);
+	  });
   h+=btn('Next&nbsp;&#9658;',p+1,p>=T-1,false);
   h+='<span class="pg-jump-wrap">Go to page <input type="number" class="pg-input" min="1" max="'+T+'" value="'+(p+1)+'" onchange="window[\\'jmp_${uid}\\']( this.value )"><\\/span>';
-  document.getElementById('${uid}-pg').innerHTML=h;
+	  document.getElementById('${uid}-pg').innerHTML=h;
+	}
+function mark(){
+  var b=document.getElementById('${uid}-body');
+  if(!b)return;
+  b.querySelectorAll('tr[data-row-index]').forEach(function(tr){
+    var sel=parseInt(tr.getAttribute('data-row-index'),10)===S;
+    tr.classList.toggle('df-row-selected',sel);
+    tr.setAttribute('aria-selected',sel?'true':'false');
+  });
 }
-window['pg_${uid}']=function(n){if(n>=0&&n<T)draw(n);};
-window['jmp_${uid}']=function(v){var p=parseInt(v,10)-1;draw(Math.max(0,Math.min(p,T-1)));};
-draw(0);
-})()`;
+	window['pg_${uid}']=function(n){if(n>=0&&n<T)draw(n);};
+	window['jmp_${uid}']=function(v){var p=parseInt(v,10)-1;draw(Math.max(0,Math.min(p,T-1)));};
+document.getElementById('${uid}-body').addEventListener('click',function(e){
+  var tr=e.target.closest&&e.target.closest('tr[data-row-index]');
+  if(!tr)return;
+  S=parseInt(tr.getAttribute('data-row-index'),10);
+  mark();
+});
+	draw(0);
+	})()`;
 
   return `<div class="df-viewer">
   <div class="df-title">
@@ -596,6 +622,37 @@ body {
 .df-note { color: var(--vscode-descriptionForeground); font-size: 11px; margin-left: 10px; white-space: nowrap; }
 .df-table-wrap { overflow-x: auto; max-height: 300px; overflow-y: auto; }
 .df-table { width: 100%; border-collapse: collapse; white-space: nowrap; }
+.df-table tbody tr { cursor: pointer; }
+.df-table tbody tr:hover td {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, .10));
+}
+.df-table tbody tr.df-row-selected td {
+  --df-selected-border: var(--vscode-focusBorder, #0078d4);
+  background: var(--vscode-list-activeSelectionBackground, rgba(0, 120, 212, .18));
+  color: var(--vscode-list-activeSelectionForeground, var(--vscode-editor-foreground));
+  box-shadow:
+    inset 0 2px 0 var(--df-selected-border),
+    inset 0 -2px 0 var(--df-selected-border);
+}
+.df-table tbody tr.df-row-selected td:first-child {
+  box-shadow:
+    inset 0 2px 0 var(--df-selected-border),
+    inset 0 -2px 0 var(--df-selected-border),
+    inset 2px 0 0 var(--df-selected-border);
+}
+.df-table tbody tr.df-row-selected td:last-child {
+  box-shadow:
+    inset 0 2px 0 var(--df-selected-border),
+    inset 0 -2px 0 var(--df-selected-border),
+    inset -2px 0 0 var(--df-selected-border);
+}
+.df-table tbody tr.df-row-selected td:first-child:last-child {
+  box-shadow:
+    inset 0 2px 0 var(--df-selected-border),
+    inset 0 -2px 0 var(--df-selected-border),
+    inset 2px 0 0 var(--df-selected-border),
+    inset -2px 0 0 var(--df-selected-border);
+}
 .df-table thead th {
   position: sticky; top: 0;
   background: var(--vscode-editor-background);

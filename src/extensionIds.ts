@@ -53,6 +53,52 @@ export async function updateRConfigValue<T>(
   await vscode.workspace.getConfiguration(R_CONFIG_SECTION).update(key, value, target);
 }
 
+export type RFigureOptions = {
+  fig_width: number;
+  fig_height: number;
+  dpi: number;
+};
+
+export function getRAdditionalExecutablePaths(): string[] {
+  return normalizePathList(getRConfigValue<string[]>('additionalRPaths', []));
+}
+
+export function getRExecutablePathCandidates(): string[] {
+  return uniqueStrings([
+    getRConfigValue('rPath', 'Rscript'),
+    ...getRAdditionalExecutablePaths(),
+  ]);
+}
+
+export async function rememberRExecutablePath(rPath: string): Promise<void> {
+  const trimmed = rPath.trim();
+  if (!trimmed) return;
+
+  const defaultPath = getRConfigValue('rPath', 'Rscript').trim();
+  if (trimmed === defaultPath) return;
+
+  const current = getRAdditionalExecutablePaths();
+  if (current.includes(trimmed)) return;
+  await updateRConfigValue('additionalRPaths', [...current, trimmed], vscode.ConfigurationTarget.Global);
+}
+
+export function getRFigureDefaults(): RFigureOptions {
+  return {
+    fig_width: numberSetting('defaultFigWidth', 7, 1, 20),
+    fig_height: numberSetting('defaultFigHeight', 5, 1, 20),
+    dpi: numberSetting('defaultDpi', 120, 72, 600),
+  };
+}
+
+export function mergeRFigureOptions(options?: Record<string, unknown>): RFigureOptions {
+  const defaults = getRFigureDefaults();
+  return {
+    fig_width: numberOption(options?.fig_width, defaults.fig_width, 1, 20),
+    fig_height: numberOption(options?.fig_height, defaults.fig_height, 1, 20),
+    dpi: numberOption(options?.dpi, defaults.dpi, 72, 600),
+  };
+}
+
 export async function updatePythonConfigValue<T>(
   key: string,
   value: T,
@@ -75,6 +121,32 @@ export function affectsRConfig(
 ): boolean {
   return event.affectsConfiguration(`${R_CONFIG_SECTION}.${key}`)
     || event.affectsConfiguration(`${LEGACY_R_CONFIG_SECTION}.${key}`);
+}
+
+function normalizePathList(value: readonly string[] | undefined): string[] {
+  return uniqueStrings((value ?? []).map((item) => String(item ?? '').trim()));
+}
+
+function uniqueStrings(values: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    const trimmed = String(value ?? '').trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    result.push(trimmed);
+  }
+  return result;
+}
+
+function numberSetting(key: string, fallback: number, min: number, max: number): number {
+  return numberOption(getRConfigValue<number>(key, fallback), fallback, min, max);
+}
+
+function numberOption(value: unknown, fallback: number, min: number, max: number): number {
+  const numeric = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.min(max, Math.max(min, numeric));
 }
 
 export type NotebookKernelMetadata = {

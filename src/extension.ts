@@ -5,10 +5,11 @@
 import * as vscode from 'vscode';
 
 import { RMarkdownEditorProvider }                                     from './rmarkdownEditor';
-import { getAllSessions, purgeSessionState }                           from './rSessionManager';
+import { disposeSession, getAllSessions, purgeSessionState }           from './rSessionManager';
 import { disposePySession, getAllPySessions }                          from './pySessionManager';
 import { buildNotebookCellsFromRmdText, RmdNotebookSerializer }        from './rmdNotebookSerializer';
 import { IpynbSerializer }                                             from './ipynbSerializer';
+import { registerNotebookKernelSourceProviders }                       from './notebookKernelSourceProvider';
 import { RNotebookController, NOTEBOOK_TYPE, registerFigureOptions }   from './rNotebookController';
 import { registerRNotebookCompletionProvider }                         from './rNotebookCompletionProvider';
 import { RmdOutputStore }                                              from './rmdOutputStore';
@@ -20,6 +21,7 @@ import {
   clearNotebookOutputs,
   exportDocumentUri,
 } from './notebookActions';
+import { hasPersistedRmdState, splitRmdSourceAndState } from './rmdPersistedState';
 import {
   COMMAND_IDS,
   EXTENSION_BRAND,
@@ -32,6 +34,7 @@ let lastActiveNotebookUri: string | undefined;
 
 export function activate(ctx: vscode.ExtensionContext): void {
   const syncingNotebookUrisFromText = new Set<string>();
+  const pendingNotebookTextSyncs = new Set<string>();
 
   // ── Variable provider (VS Code 1.90+ native Variables panel) ────────────
   const varProvider = new RNotebookVariableProvider();
@@ -70,26 +73,42 @@ export function activate(ctx: vscode.ExtensionContext): void {
   const pyController = new PyNotebookController(ctx, varProvider);
   ctx.subscriptions.push(pyController);
   registerPyFigureOptions(ctx);
+  registerNotebookKernelSourceProviders(ctx);
 
   rememberNotebookDocument(vscode.window.activeNotebookEditor?.notebook);
   ctx.subscriptions.push(
     vscode.window.onDidChangeActiveNotebookEditor((editor) => {
       rememberNotebookDocument(editor?.notebook);
-      void ensureRmdNotebookTextDocument(editor?.notebook);
+      void ensureManagedNotebookTextDocument(editor?.notebook);
     }),
     vscode.workspace.onDidOpenNotebookDocument((notebook) => {
-      void ensureRmdNotebookTextDocument(notebook);
+      void ensureManagedNotebookTextDocument(notebook);
     }),
     vscode.workspace.onDidChangeTextDocument((event) => {
-      void syncNotebookDocumentFromTextChange(event, syncingNotebookUrisFromText);
+      void syncNotebookDocumentFromTextChange(
+        event,
+        syncingNotebookUrisFromText,
+        pendingNotebookTextSyncs,
+        rmdOutputStore,
+        rController,
+        pyController,
+      );
     }),
     vscode.workspace.onDidChangeNotebookDocument((event) => {
       void cleanupClearedNotebookChange(event, rmdOutputStore);
+      void flushPendingNotebookTextSync(
+        event.notebook,
+        syncingNotebookUrisFromText,
+        pendingNotebookTextSyncs,
+        rmdOutputStore,
+        rController,
+        pyController,
+      );
     }),
   );
-  registerNotebookStateWatchers(ctx, rmdOutputStore);
+  registerNotebookStateWatchers(ctx, rmdOutputStore, pyController);
   for (const notebook of vscode.workspace.notebookDocuments) {
-    void ensureRmdNotebookTextDocument(notebook);
+    void ensureManagedNotebookTextDocument(notebook);
   }
 
   if (typeof vscode.notebooks.createRendererMessaging === 'function') {
@@ -97,21 +116,47 @@ export function activate(ctx: vscode.ExtensionContext): void {
     ctx.subscriptions.push(
       rendererMessaging.onDidReceiveMessage(async ({ editor, message }) => {
         if (!message || typeof message !== 'object') return;
-        if (message.type !== 'open_console_in_tab') return;
+        if (
+          message.type !== 'open_console_in_tab'
+          && message.type !== 'open_output_in_tab'
+          && message.type !== 'copy_console'
+        ) return;
 
         const chunkId = typeof message.chunkId === 'string' && message.chunkId
           ? message.chunkId
           : 'console';
+        const title = typeof message.title === 'string' && message.title
+          ? message.title
+          : message.type === 'open_output_in_tab'
+            ? `Output: ${chunkId}`
+            : `Console: ${chunkId}`;
         const content = typeof message.content === 'string'
           ? message.content
           : String(message.content ?? '');
+        if (message.type === 'copy_console') {
+          await vscode.env.clipboard.writeText(content);
+          void vscode.window.setStatusBarMessage('Copied to ClipBoard', 2000);
+          return;
+        }
+
         const panel = vscode.window.createWebviewPanel(
           'rNotebook.consoleOutput',
-          `Console: ${chunkId}`,
+          title,
           editor.viewColumn ?? vscode.ViewColumn.Beside,
-          { enableScripts: false, retainContextWhenHidden: true },
+          { enableScripts: true, retainContextWhenHidden: true },
         );
-        panel.webview.html = buildConsoleTabHtml(chunkId, content);
+        const copyDisposable = panel.webview.onDidReceiveMessage(async (panelMessage) => {
+          if (!panelMessage || typeof panelMessage !== 'object') return;
+          if (panelMessage.type !== 'copy_console') return;
+          const panelContent = typeof panelMessage.content === 'string'
+            ? panelMessage.content
+            : String(panelMessage.content ?? '');
+          await vscode.env.clipboard.writeText(panelContent);
+          void vscode.window.setStatusBarMessage('Copied to ClipBoard', 2000);
+          await panel.webview.postMessage({ type: 'copy_console_done' });
+        });
+        panel.onDidDispose(() => copyDisposable.dispose());
+        panel.webview.html = buildConsoleTabHtml(title, content);
       }),
     );
   }
@@ -119,6 +164,8 @@ export function activate(ctx: vscode.ExtensionContext): void {
   ctx.subscriptions.push(
     vscode.workspace.onDidCloseNotebookDocument((notebook) => {
       const uri = notebook.uri.toString();
+      pendingNotebookTextSyncs.delete(uri);
+      syncingNotebookUrisFromText.delete(uri);
       if (lastActiveNotebookUri === uri) lastActiveNotebookUri = undefined;
       if (notebook.notebookType === NOTEBOOK_TYPE) {
         // Reopened notebook cells get fresh document URIs, so stale cached output
@@ -160,6 +207,12 @@ export function activate(ctx: vscode.ExtensionContext): void {
 
   // ── Webview commands ──────────────────────────────────────────────────────
   ctx.subscriptions.push(
+    vscode.commands.registerCommand(COMMAND_IDS.notebookSelectAvailableRKernels, async (target?: unknown) => {
+      await rController.showKernelPicker(resolveNotebookDocument(target));
+    }),
+    vscode.commands.registerCommand(COMMAND_IDS.notebookSelectAvailablePythonKernels, async (target?: unknown) => {
+      await pyController.showKernelPicker(resolveNotebookDocument(target), { includeManual: true });
+    }),
     vscode.commands.registerCommand(COMMAND_IDS.rRunChunk, () =>
       vscode.commands.executeCommand('workbench.action.webview.postMessage',
         { type: 'run_focused_chunk' })),
@@ -359,6 +412,9 @@ function resolveNotebookDocument(target?: unknown): vscode.NotebookDocument | un
 }
 
 function resolveNotebookTarget(target?: unknown): vscode.NotebookDocument | undefined {
+  const directNotebook = resolveLiveManagedNotebookDocument(target);
+  if (directNotebook) return directNotebook;
+
   if (Array.isArray(target)) {
     for (const entry of target) {
       const resolved = resolveNotebookTarget(entry);
@@ -367,29 +423,28 @@ function resolveNotebookTarget(target?: unknown): vscode.NotebookDocument | unde
     return undefined;
   }
 
-  if (target instanceof vscode.Uri) {
-    return findNotebookByUri(target.toString());
+  const targetUri = reviveUriLike(target);
+  if (targetUri) {
+    return findNotebookByUri(targetUri);
   }
 
   if (target && typeof target === 'object') {
     const candidate = target as {
-      notebook?: vscode.NotebookDocument;
-      notebookEditor?: vscode.NotebookEditor;
-      cell?: vscode.NotebookCell;
-      uri?: vscode.Uri;
-      resource?: vscode.Uri;
+      notebook?: unknown;
+      notebookEditor?: { notebook?: unknown };
+      cell?: { notebook?: unknown };
+      uri?: unknown;
+      resource?: unknown;
       notebookType?: string;
-      notebookUri?: vscode.Uri;
+      notebookUri?: unknown;
     };
-    if (isManagedNotebookDocument(candidate.notebook)) return candidate.notebook;
-    if (isManagedNotebookDocument(candidate.notebookEditor?.notebook)) return candidate.notebookEditor?.notebook;
-    if (isManagedNotebookDocument(candidate.cell?.notebook)) return candidate.cell?.notebook;
-    if (candidate.uri && candidate.notebookType) {
-      const notebook = candidate as unknown as vscode.NotebookDocument;
-      return isManagedNotebookDocument(notebook) ? notebook : undefined;
-    }
-    const resource = candidate.notebookUri ?? candidate.resource ?? candidate.uri;
-    if (resource) return findNotebookByUri(resource.toString());
+    const notebook = resolveLiveManagedNotebookDocument(candidate.notebook)
+      ?? resolveLiveManagedNotebookDocument(candidate.notebookEditor?.notebook)
+      ?? resolveLiveManagedNotebookDocument(candidate.cell?.notebook);
+    if (notebook) return notebook;
+
+    const resource = reviveUriLike(candidate.notebookUri ?? candidate.resource ?? candidate.uri);
+    if (resource) return findNotebookByUri(resource);
   }
 
   return undefined;
@@ -400,9 +455,56 @@ function rememberNotebookDocument(notebook?: vscode.NotebookDocument): void {
   lastActiveNotebookUri = notebook.uri.toString();
 }
 
-function findNotebookByUri(uri?: string): vscode.NotebookDocument | undefined {
-  if (!uri) return undefined;
-  const notebook = vscode.workspace.notebookDocuments.find((doc) => doc.uri.toString() === uri);
+function resolveLiveManagedNotebookDocument(target?: unknown): vscode.NotebookDocument | undefined {
+  if (!target || typeof target !== 'object') return undefined;
+  const candidate = target as {
+    uri?: unknown;
+    notebookType?: unknown;
+    getCells?: unknown;
+    cellAt?: unknown;
+  };
+  const notebookType = candidate.notebookType;
+  if (notebookType !== NOTEBOOK_TYPE && notebookType !== PY_NOTEBOOK_TYPE) return undefined;
+
+  const uri = reviveUriLike(candidate.uri);
+  if (uri) {
+    return findNotebookByUri(uri)
+      ?? (
+        typeof candidate.getCells === 'function' || typeof candidate.cellAt === 'function'
+          ? target as vscode.NotebookDocument
+          : undefined
+      );
+  }
+
+  return typeof candidate.getCells === 'function' || typeof candidate.cellAt === 'function'
+    ? target as vscode.NotebookDocument
+    : undefined;
+}
+
+function reviveUriLike(value: unknown): vscode.Uri | undefined {
+  if (!value) return undefined;
+  if (value instanceof vscode.Uri) return value;
+  if (typeof value !== 'object') return undefined;
+
+  const candidate = value as {
+    scheme?: unknown;
+    path?: unknown;
+  };
+  if (typeof candidate.scheme !== 'string' || typeof candidate.path !== 'string') {
+    return undefined;
+  }
+
+  try {
+    return vscode.Uri.revive(value as vscode.UriComponents);
+  } catch {
+    return undefined;
+  }
+}
+
+function findNotebookByUri(uri?: string | vscode.Uri): vscode.NotebookDocument | undefined {
+  const uriKey = typeof uri === 'string' ? uri : uri?.toString();
+  if (!uriKey) return undefined;
+  const notebook = vscode.workspace.notebookDocuments.find((doc) => doc.uri.toString() === uriKey);
   return managedNotebook(notebook);
 }
 
@@ -417,10 +519,17 @@ function isManagedNotebookDocument(notebook?: vscode.NotebookDocument): boolean 
     || notebook?.notebookType === PY_NOTEBOOK_TYPE;
 }
 
-async function ensureRmdNotebookTextDocument(
+function shouldTrackBackingTextDocument(
+  notebook?: vscode.NotebookDocument,
+): boolean {
+  return notebook?.notebookType === NOTEBOOK_TYPE;
+}
+
+async function ensureManagedNotebookTextDocument(
   notebook?: vscode.NotebookDocument,
 ): Promise<void> {
-  if (notebook?.notebookType !== NOTEBOOK_TYPE) return;
+  if (!shouldTrackBackingTextDocument(notebook)) return;
+  if (!isManagedNotebookDocument(notebook)) return;
   try {
     await vscode.workspace.openTextDocument(notebook.uri);
   } catch {
@@ -432,28 +541,221 @@ async function ensureRmdNotebookTextDocument(
 async function syncNotebookDocumentFromTextChange(
   event: vscode.TextDocumentChangeEvent,
   syncingNotebookUrisFromText: Set<string>,
+  pendingNotebookTextSyncs: Set<string>,
+  rmdOutputStore: RmdOutputStore,
+  rController: RNotebookController,
+  pyController: PyNotebookController,
 ): Promise<void> {
   const notebook = findNotebookByUri(event.document.uri.toString());
-  if (!notebook || notebook.notebookType !== NOTEBOOK_TYPE) return;
-  if (!isRmdLikeUri(event.document.uri)) return;
+  if (!notebook) return;
+  if (!isManagedNotebookUri(event.document.uri)) return;
+  if (
+    notebook.notebookType === PY_NOTEBOOK_TYPE
+    && !vscode.window.visibleTextEditors.some((editor) => editor.document.uri.toString() === event.document.uri.toString())
+  ) {
+    return;
+  }
 
   const notebookUri = notebook.uri.toString();
-  if (syncingNotebookUrisFromText.has(notebookUri)) return;
+  const text = event.document.getText();
+  if (isRmdPersistedStateOnlyChange(notebook, text)) {
+    pendingNotebookTextSyncs.delete(notebookUri);
+    return;
+  }
+  if (syncingNotebookUrisFromText.has(notebookUri)) {
+    pendingNotebookTextSyncs.add(notebookUri);
+    return;
+  }
+  if (hasPendingExecutionForNotebook(notebook, rController, pyController)) {
+    pendingNotebookTextSyncs.add(notebookUri);
+    return;
+  }
 
-  const nextCells = buildNotebookCellsFromRmdText(event.document.getText())
-    .map((cell) => stripCodeCellOutputs(cell));
-  if (notebookCellsMatch(notebook, nextCells)) return;
+  pendingNotebookTextSyncs.delete(notebookUri);
+  await syncNotebookDocumentFromText(
+    notebook,
+    text,
+    syncingNotebookUrisFromText,
+    pendingNotebookTextSyncs,
+    rmdOutputStore,
+    rController,
+    pyController,
+  );
+}
+
+async function flushPendingNotebookTextSync(
+  notebook: vscode.NotebookDocument,
+  syncingNotebookUrisFromText: Set<string>,
+  pendingNotebookTextSyncs: Set<string>,
+  rmdOutputStore: RmdOutputStore,
+  rController: RNotebookController,
+  pyController: PyNotebookController,
+): Promise<void> {
+  if (!isManagedNotebookDocument(notebook)) return;
+  const notebookUri = notebook.uri.toString();
+  if (!pendingNotebookTextSyncs.has(notebookUri)) return;
+  if (syncingNotebookUrisFromText.has(notebookUri)) return;
+  if (hasPendingExecutionForNotebook(notebook, rController, pyController)) return;
+
+  pendingNotebookTextSyncs.delete(notebookUri);
+  try {
+    const textDocument = await vscode.workspace.openTextDocument(notebook.uri);
+    const text = textDocument.getText();
+    if (isRmdPersistedStateOnlyChange(notebook, text)) {
+      return;
+    }
+    await syncNotebookDocumentFromText(
+      notebook,
+      text,
+      syncingNotebookUrisFromText,
+      pendingNotebookTextSyncs,
+      rmdOutputStore,
+      rController,
+      pyController,
+    );
+  } catch {
+    pendingNotebookTextSyncs.add(notebookUri);
+  }
+}
+
+type NotebookTextSyncState = {
+  cells: readonly vscode.NotebookCellData[];
+  metadata?: vscode.NotebookDocumentMetadata;
+};
+
+async function syncNotebookDocumentFromText(
+  notebook: vscode.NotebookDocument,
+  text: string,
+  syncingNotebookUrisFromText: Set<string>,
+  pendingNotebookTextSyncs: Set<string>,
+  rmdOutputStore: RmdOutputStore,
+  rController: RNotebookController,
+  pyController: PyNotebookController,
+): Promise<void> {
+  const notebookUri = notebook.uri.toString();
+  let nextState: NotebookTextSyncState;
+  try {
+    nextState = buildNotebookTextSyncState(notebook, text);
+  } catch {
+    pendingNotebookTextSyncs.add(notebookUri);
+    return;
+  }
+
+  if (hasPendingExecutionForNotebook(notebook, rController, pyController)) {
+    pendingNotebookTextSyncs.add(notebookUri);
+    return;
+  }
+
+  const shouldHardResetRmdOutputs = shouldTreatRmdSourceAsFresh(
+    notebook,
+    text,
+    rmdOutputStore,
+  );
+  if (shouldHardResetRmdOutputs) {
+    rmdOutputStore.markHardReset(notebookUri);
+  }
+
+  if (notebookMatchesSyncState(notebook, nextState)) {
+    if (shouldHardResetRmdOutputs) {
+      await clearNotebookCodeOutputs(notebook);
+      rmdOutputStore.finishHardReset(notebookUri);
+    }
+    return;
+  }
 
   syncingNotebookUrisFromText.add(notebookUri);
   try {
+    const edits: vscode.NotebookEdit[] = [];
+    if (!notebookMetadataEqual(notebook.metadata, nextState.metadata)) {
+      edits.push(buildUpdateNotebookMetadataEdit(nextState.metadata ?? {}));
+    }
+    edits.push(buildReplaceNotebookCellsEdit(notebook, nextState.cells));
+
     const edit = new vscode.WorkspaceEdit();
-    edit.set(notebook.uri, [
-      buildReplaceNotebookCellsEdit(notebook, nextCells),
-    ]);
+    edit.set(notebook.uri, edits);
     await vscode.workspace.applyEdit(edit);
   } finally {
     syncingNotebookUrisFromText.delete(notebookUri);
   }
+
+  await flushPendingNotebookTextSync(
+    notebook,
+    syncingNotebookUrisFromText,
+    pendingNotebookTextSyncs,
+    rmdOutputStore,
+    rController,
+    pyController,
+  );
+}
+
+function isRmdPersistedStateOnlyChange(
+  notebook: vscode.NotebookDocument,
+  text: string,
+): boolean {
+  if (notebook.notebookType !== NOTEBOOK_TYPE) return false;
+  if (!hasPersistedRmdState(text)) return false;
+
+  let nextState: NotebookTextSyncState;
+  try {
+    nextState = buildNotebookTextSyncState(notebook, text);
+  } catch {
+    return false;
+  }
+  return notebookMatchesSyncState(notebook, nextState);
+}
+
+function buildNotebookTextSyncState(
+  notebook: vscode.NotebookDocument,
+  text: string,
+): NotebookTextSyncState {
+  if (notebook.notebookType === NOTEBOOK_TYPE) {
+    const { source } = splitRmdSourceAndState(text);
+    return {
+      cells: buildNotebookCellsFromRmdText(source).map((cell) => stripCodeCellOutputs(cell)),
+    };
+  }
+
+  JSON.parse(text);
+  const serializer = new IpynbSerializer();
+  const notebookData = serializer.deserializeNotebook(new TextEncoder().encode(text));
+  return {
+    cells: notebookData.cells.map((cell, index) => cloneIpynbSyncCellData(notebook, cell, index)),
+    metadata: notebookData.metadata as vscode.NotebookDocumentMetadata | undefined,
+  };
+}
+
+function cloneNotebookCellData(cell: vscode.NotebookCellData): vscode.NotebookCellData {
+  const clone = new vscode.NotebookCellData(cell.kind, cell.value, cell.languageId);
+  clone.metadata = cell.metadata as vscode.NotebookCellMetadata | undefined;
+  clone.outputs = [...(cell.outputs ?? [])];
+  return clone;
+}
+
+function cloneIpynbSyncCellData(
+  notebook: vscode.NotebookDocument,
+  cell: vscode.NotebookCellData,
+  index: number,
+): vscode.NotebookCellData {
+  const clone = cloneNotebookCellData(cell);
+  if (clone.kind !== vscode.NotebookCellKind.Code) return clone;
+
+  const currentCell = notebook.getCells()[index];
+  if (!currentCell || currentCell.kind !== vscode.NotebookCellKind.Code) return clone;
+
+  // Backing-file sync should update source/metadata without blowing away the
+  // notebook's current rendered outputs. This matches Jupyter's behavior more
+  // closely and prevents long-running Python notebook results from vanishing
+  // when the hidden .ipynb text document changes underneath the open notebook.
+  clone.outputs = [...currentCell.outputs];
+  return clone;
+}
+
+function notebookMatchesSyncState(
+  notebook: vscode.NotebookDocument,
+  nextState: NotebookTextSyncState,
+): boolean {
+  return notebookCellsMatch(notebook, nextState.cells)
+    && notebookMetadataEqual(notebook.metadata, nextState.metadata);
 }
 
 function stripCodeCellOutputs(cell: vscode.NotebookCellData): vscode.NotebookCellData {
@@ -461,6 +763,24 @@ function stripCodeCellOutputs(cell: vscode.NotebookCellData): vscode.NotebookCel
   next.metadata = cell.metadata as vscode.NotebookCellMetadata | undefined;
   next.outputs = cell.kind === vscode.NotebookCellKind.Code ? [] : [...cell.outputs];
   return next;
+}
+
+function shouldTreatRmdSourceAsFresh(
+  notebook: vscode.NotebookDocument,
+  text: string,
+  rmdOutputStore: RmdOutputStore,
+): boolean {
+  if (notebook.notebookType !== NOTEBOOK_TYPE) return false;
+  if (hasPersistedRmdState(text)) return false;
+
+  const docUri = notebook.uri.toString();
+  return rmdOutputStore.hasHardReset(docUri) || notebookHasVisibleCodeOutputs(notebook);
+}
+
+function notebookHasVisibleCodeOutputs(notebook: vscode.NotebookDocument): boolean {
+  return notebook
+    .getCells()
+    .some((cell) => cell.kind === vscode.NotebookCellKind.Code && cell.outputs.length > 0);
 }
 
 function buildReplaceNotebookCellsEdit(
@@ -482,6 +802,63 @@ function buildReplaceNotebookCellsEdit(
   );
 }
 
+async function clearNotebookCodeOutputs(
+  notebook: vscode.NotebookDocument,
+): Promise<void> {
+  const edits: vscode.NotebookEdit[] = [];
+  for (const cell of notebook.getCells()) {
+    if (cell.kind !== vscode.NotebookCellKind.Code) continue;
+    if (cell.outputs.length === 0) continue;
+    edits.push(buildUpdateCellOutputsEdit(cell, []));
+  }
+  if (edits.length === 0) return;
+
+  const edit = new vscode.WorkspaceEdit();
+  edit.set(notebook.uri, edits);
+  await vscode.workspace.applyEdit(edit);
+}
+
+function buildUpdateCellOutputsEdit(
+  cell: vscode.NotebookCell,
+  outputs: readonly vscode.NotebookCellOutput[],
+): vscode.NotebookEdit {
+  const notebookEdit = vscode.NotebookEdit as typeof vscode.NotebookEdit & {
+    updateCellOutputs?: (
+      index: number,
+      outputs: readonly vscode.NotebookCellOutput[],
+    ) => vscode.NotebookEdit;
+    replaceCells?: (
+      range: vscode.NotebookRange,
+      newCells: readonly vscode.NotebookCellData[],
+    ) => vscode.NotebookEdit;
+  };
+
+  if (typeof notebookEdit.updateCellOutputs === 'function') {
+    return notebookEdit.updateCellOutputs(cell.index, outputs);
+  }
+  if (typeof notebookEdit.replaceCells !== 'function') {
+    throw new Error('Notebook output edit API is unavailable in this editor build.');
+  }
+
+  const replacement = new vscode.NotebookCellData(
+    cell.kind,
+    cell.document.getText(),
+    cell.document.languageId,
+  );
+  replacement.metadata = cell.metadata as vscode.NotebookCellMetadata | undefined;
+  replacement.outputs = [...outputs];
+  return notebookEdit.replaceCells(
+    new vscode.NotebookRange(cell.index, cell.index + 1),
+    [replacement],
+  );
+}
+
+function buildUpdateNotebookMetadataEdit(
+  metadata: vscode.NotebookDocumentMetadata,
+): vscode.NotebookEdit {
+  return vscode.NotebookEdit.updateNotebookMetadata(metadata);
+}
+
 function notebookCellsMatch(
   notebook: vscode.NotebookDocument,
   nextCells: readonly vscode.NotebookCellData[],
@@ -496,16 +873,68 @@ function notebookCellsMatch(
     if (current.document.languageId !== next.languageId) return false;
     if (current.document.getText() !== next.value) return false;
     if (!notebookCellMetadataEqual(current.metadata, next.metadata)) return false;
+    if (
+      notebook.notebookType === PY_NOTEBOOK_TYPE
+      && !notebookCellOutputsEqual(current.outputs, next.outputs ?? [])
+    ) {
+      return false;
+    }
   }
 
   return true;
+}
+
+function notebookMetadataEqual(
+  left: vscode.NotebookDocumentMetadata | undefined,
+  right: vscode.NotebookDocumentMetadata | undefined,
+): boolean {
+  return stableStringify(left ?? {}) === stableStringify(right ?? {});
 }
 
 function notebookCellMetadataEqual(
   left: vscode.NotebookCellMetadata | undefined,
   right: vscode.NotebookCellMetadata | undefined,
 ): boolean {
-  return stableStringify(left ?? {}) === stableStringify(right ?? {});
+  return stableStringify(normalizeNotebookCellMetadata(left))
+    === stableStringify(normalizeNotebookCellMetadata(right));
+}
+
+function notebookCellOutputsEqual(
+  left: readonly vscode.NotebookCellOutput[],
+  right: readonly vscode.NotebookCellOutput[],
+): boolean {
+  return stableStringify(left.map(serializeNotebookCellOutput))
+    === stableStringify(right.map(serializeNotebookCellOutput));
+}
+
+function serializeNotebookCellOutput(output: vscode.NotebookCellOutput): {
+  metadata?: { [key: string]: any };
+  items: { mime: string; data: string }[];
+} {
+  return {
+    metadata: output.metadata,
+    items: output.items.map((item) => ({
+      mime: item.mime,
+      data: Buffer.from(item.data).toString('base64'),
+    })),
+  };
+}
+
+function normalizeNotebookCellMetadata(
+  metadata: vscode.NotebookCellMetadata | undefined,
+): Record<string, unknown> {
+  if (!metadata || typeof metadata !== 'object') return {};
+  const source = metadata as Record<string, unknown>;
+  const hasRmdNotebookKeys =
+    source.kind !== undefined
+    || source.optionStyle !== undefined
+    || source.options !== undefined;
+  if (!hasRmdNotebookKeys) return source;
+  const normalized: Record<string, unknown> = {};
+  if (source.kind !== undefined) normalized.kind = source.kind;
+  if (source.optionStyle !== undefined) normalized.optionStyle = source.optionStyle;
+  if (source.options !== undefined) normalized.options = source.options;
+  return normalized;
 }
 
 function stableStringify(value: unknown): string {
@@ -527,9 +956,24 @@ function normalizeForComparison(value: unknown): unknown {
   return value;
 }
 
-function isRmdLikeUri(uri: vscode.Uri): boolean {
+function isManagedNotebookUri(uri: vscode.Uri): boolean {
   const fsPath = uri.fsPath.toLowerCase();
-  return fsPath.endsWith('.rmd') || fsPath.endsWith('.qmd');
+  return fsPath.endsWith('.rmd') || fsPath.endsWith('.qmd') || fsPath.endsWith('.ipynb');
+}
+
+function hasPendingExecutionForNotebook(
+  notebook: vscode.NotebookDocument,
+  rController: RNotebookController,
+  pyController: PyNotebookController,
+): boolean {
+  const docUri = notebook.uri.toString();
+  if (notebook.notebookType === NOTEBOOK_TYPE) {
+    return rController.hasPendingExecution(docUri);
+  }
+  if (notebook.notebookType === PY_NOTEBOOK_TYPE) {
+    return pyController.hasPendingExecution(docUri);
+  }
+  return false;
 }
 
 function resolveExportableTextDocument(): vscode.TextDocument | undefined {
@@ -542,13 +986,154 @@ function resolveExportableTextDocument(): vscode.TextDocument | undefined {
   return undefined;
 }
 
+function scheduleNotebookConflictSave(
+  notebook: vscode.NotebookDocument,
+  pendingNotebookConflictSaves: Set<string>,
+  notebookConflictSaveTimers: Map<string, ReturnType<typeof setTimeout>>,
+  syncingNotebookUrisFromText: Set<string>,
+  pendingNotebookTextSyncs: Set<string>,
+  rController: RNotebookController,
+  pyController: PyNotebookController,
+): void {
+  if (!isManagedNotebookDocument(notebook)) return;
+
+  const notebookUri = notebook.uri.toString();
+  if (!notebook.isDirty) {
+    clearScheduledNotebookConflictSave(
+      notebookUri,
+      pendingNotebookConflictSaves,
+      notebookConflictSaveTimers,
+    );
+    return;
+  }
+
+  const hasVisibleBackingEditor = vscode.window.visibleTextEditors.some((editor) =>
+    editor.document.uri.toString() === notebookUri,
+  );
+  if (hasVisibleBackingEditor) return;
+
+  pendingNotebookConflictSaves.add(notebookUri);
+  const existingTimer = notebookConflictSaveTimers.get(notebookUri);
+  if (existingTimer) clearTimeout(existingTimer);
+
+  notebookConflictSaveTimers.set(
+    notebookUri,
+    setTimeout(() => {
+      void attemptNotebookConflictSave(
+        notebookUri,
+        pendingNotebookConflictSaves,
+        notebookConflictSaveTimers,
+        syncingNotebookUrisFromText,
+        pendingNotebookTextSyncs,
+        rController,
+        pyController,
+      );
+    }, 1200),
+  );
+}
+
+function clearScheduledNotebookConflictSave(
+  notebookUri: string,
+  pendingNotebookConflictSaves: Set<string>,
+  notebookConflictSaveTimers: Map<string, ReturnType<typeof setTimeout>>,
+): void {
+  pendingNotebookConflictSaves.delete(notebookUri);
+  const timer = notebookConflictSaveTimers.get(notebookUri);
+  if (timer) clearTimeout(timer);
+  notebookConflictSaveTimers.delete(notebookUri);
+}
+
+async function attemptNotebookConflictSave(
+  notebookUri: string,
+  pendingNotebookConflictSaves: Set<string>,
+  notebookConflictSaveTimers: Map<string, ReturnType<typeof setTimeout>>,
+  syncingNotebookUrisFromText: Set<string>,
+  pendingNotebookTextSyncs: Set<string>,
+  rController: RNotebookController,
+  pyController: PyNotebookController,
+): Promise<void> {
+  const notebook = findNotebookByUri(notebookUri);
+  if (!notebook || !pendingNotebookConflictSaves.has(notebookUri)) {
+    clearScheduledNotebookConflictSave(
+      notebookUri,
+      pendingNotebookConflictSaves,
+      notebookConflictSaveTimers,
+    );
+    return;
+  }
+
+  if (!notebook.isDirty) {
+    clearScheduledNotebookConflictSave(
+      notebookUri,
+      pendingNotebookConflictSaves,
+      notebookConflictSaveTimers,
+    );
+    return;
+  }
+
+  const hasVisibleBackingEditor = vscode.window.visibleTextEditors.some((editor) =>
+    editor.document.uri.toString() === notebookUri,
+  );
+  if (hasVisibleBackingEditor) {
+    clearScheduledNotebookConflictSave(
+      notebookUri,
+      pendingNotebookConflictSaves,
+      notebookConflictSaveTimers,
+    );
+    return;
+  }
+
+  if (
+    syncingNotebookUrisFromText.has(notebookUri)
+    || pendingNotebookTextSyncs.has(notebookUri)
+    || hasPendingExecutionForNotebook(notebook, rController, pyController)
+  ) {
+    scheduleNotebookConflictSave(
+      notebook,
+      pendingNotebookConflictSaves,
+      notebookConflictSaveTimers,
+      syncingNotebookUrisFromText,
+      pendingNotebookTextSyncs,
+      rController,
+      pyController,
+    );
+    return;
+  }
+
+  try {
+    await saveNotebookDocument(notebook);
+  } catch {
+    // If the conflict prompt is still open, retry after a short delay.
+  }
+
+  if (!notebook.isDirty) {
+    clearScheduledNotebookConflictSave(
+      notebookUri,
+      pendingNotebookConflictSaves,
+      notebookConflictSaveTimers,
+    );
+    return;
+  }
+
+  scheduleNotebookConflictSave(
+    notebook,
+    pendingNotebookConflictSaves,
+    notebookConflictSaveTimers,
+    syncingNotebookUrisFromText,
+    pendingNotebookTextSyncs,
+    rController,
+    pyController,
+  );
+}
+
 function registerNotebookStateWatchers(
   ctx: vscode.ExtensionContext,
   rmdOutputStore: RmdOutputStore,
+  pyController: PyNotebookController,
 ): void {
   const patterns = ['**/*.Rmd', '**/*.rmd', '**/*.Qmd', '**/*.qmd', '**/*.ipynb'];
   const handleUri = (uri: vscode.Uri) => {
-    void purgeNotebookUriState(uri, rmdOutputStore);
+    void purgeNotebookUriState(uri, rmdOutputStore, pyController);
   };
 
   for (const pattern of patterns) {
@@ -564,10 +1149,12 @@ function registerNotebookStateWatchers(
 async function purgeNotebookUriState(
   uri: vscode.Uri,
   rmdOutputStore: RmdOutputStore,
+  pyController: PyNotebookController,
 ): Promise<void> {
   const docUri = uri.toString();
   rmdOutputStore.markHardReset(docUri);
   forgetRNotebookKernel(docUri);
+  await pyController.forgetNotebookSelection(docUri);
   await purgeSessionState(docUri);
   await disposePySession(docUri);
   if (lastActiveNotebookUri === docUri) lastActiveNotebookUri = undefined;
@@ -595,6 +1182,25 @@ function buildConsoleTabHtml(chunkId: string, content: string): string {
     font-weight: 600;
     margin: 0 0 12px;
   }
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  button {
+    background: var(--vscode-button-background, #0078d4);
+    color: var(--vscode-button-foreground, #fff);
+    border: 1px solid var(--vscode-button-background, #0078d4);
+    border-radius: 2px;
+    padding: 3px 9px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  #copy-status {
+    color: var(--vscode-descriptionForeground);
+    font-size: 12px;
+  }
   pre {
     margin: 0;
     white-space: pre-wrap;
@@ -603,11 +1209,45 @@ function buildConsoleTabHtml(chunkId: string, content: string): string {
     font-size: 12px;
     line-height: 1.45;
   }
-</style>
-</head><body>
-<h1>${escapeHtml(chunkId)}</h1>
-<pre>${escapeHtml(content)}</pre>
-</body></html>`;
+	</style>
+	</head><body>
+	<h1>${escapeHtml(chunkId)}</h1>
+	<div class="toolbar">
+	  <button id="copy-console" type="button">Copy</button>
+	  <span id="copy-status"></span>
+	</div>
+	<pre>${escapeHtml(content)}</pre>
+	<script>
+	(function () {
+	  const content = ${escapeScriptJson(content)};
+	  const vscode = typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : null;
+	  const button = document.getElementById('copy-console');
+	  const status = document.getElementById('copy-status');
+	  function showStatus(text) {
+	    if (!status) return;
+	    status.textContent = text;
+	    setTimeout(() => { status.textContent = ''; }, 1800);
+	  }
+	  button?.addEventListener('click', async () => {
+	    try {
+	      if (vscode) {
+	        vscode.postMessage({ type: 'copy_console', content });
+	        return;
+	      }
+	      await navigator.clipboard.writeText(content);
+	      showStatus('Copied to ClipBoard');
+	    } catch {
+	      showStatus('Copy failed');
+	    }
+	  });
+	  window.addEventListener('message', (event) => {
+	    if (event.data && event.data.type === 'copy_console_done') {
+	      showStatus('Copied to ClipBoard');
+	    }
+	  });
+	}());
+	</script>
+	</body></html>`;
 }
 
 function escapeHtml(value: string): string {
@@ -616,6 +1256,15 @@ function escapeHtml(value: string): string {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+function escapeScriptJson(value: string): string {
+  return JSON.stringify(String(value ?? ''))
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e')
+    .replace(/&/g, '\\u0026')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
 }
 
 // ---------------------------------------------------------------------------

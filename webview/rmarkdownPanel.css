@@ -463,6 +463,53 @@ body {
 .chunk-output { margin-top: 4px; }
 .chunk-output:empty { display: none; }
 
+.output-console-wrap {
+  border: 1px solid var(--vscode-editorGroup-border, #c0c0c0);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+
+.output-console-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--vscode-editorGroup-border, #c0c0c0);
+}
+
+.output-copy-btn {
+  background: var(--vscode-input-background, #f3f3f3);
+  color: var(--vscode-input-foreground, #222);
+  border: 1px solid var(--vscode-input-border, #c8c8c8);
+  border-radius: 2px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  box-shadow: none;
+}
+
+.output-copy-btn:hover,
+.output-copy-btn:active {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, .16));
+  border-color: var(--vscode-input-border, #c8c8c8);
+  color: var(--vscode-input-foreground, #222);
+  box-shadow: none;
+}
+
+.output-copy-btn:focus,
+.output-copy-btn:focus-visible {
+  border-color: var(--vscode-input-border, #c8c8c8);
+  outline: none;
+  box-shadow: none;
+}
+
+.output-copy-btn:disabled {
+  opacity: .85;
+  border-color: var(--vscode-input-border, #c8c8c8);
+  box-shadow: none;
+}
+
 .output-text {
   background: var(--vscode-editor-background);
   color: var(--vscode-editor-foreground);
@@ -478,6 +525,11 @@ body {
   overflow-y: auto;
   overflow-x: hidden;
   cursor: default;
+}
+
+.output-console-wrap .output-text {
+  border-left: none;
+  margin-bottom: 0;
 }
 
 .output-stderr {
@@ -506,6 +558,97 @@ body {
   overflow-y: auto;
   overflow-x: hidden;
   cursor: default;
+}
+
+.output-error-panel {
+  border: 1px solid var(--vscode-inputValidation-errorBorder, rgba(224, 108, 117, .55));
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 6px;
+  background: var(--vscode-inputValidation-errorBackground);
+  color: var(--vscode-errorForeground, #e06c75);
+}
+
+.output-error-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--vscode-inputValidation-errorBorder, rgba(224, 108, 117, .35));
+  font-size: 12px;
+}
+
+.output-error-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.output-error-body {
+  padding: 10px 12px;
+  max-height: 400px;
+  overflow: auto;
+}
+
+.output-error-summary {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px;
+  align-items: start;
+  margin-bottom: 8px;
+}
+
+.output-error-mark {
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.output-error-message,
+.output-error-detail,
+.output-error-frame-code {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+}
+
+.output-error-detail-wrap {
+  margin: 6px 0 10px 20px;
+}
+
+.output-error-detail-wrap summary,
+.output-error-trace-title {
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+
+.output-error-trace-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.output-error-frame {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  gap: 8px;
+  padding: 5px 8px;
+  border-left: 2px solid rgba(255, 120, 120, .35);
+  background: rgba(224, 108, 117, .08);
+}
+
+.output-error-frame-no {
+  color: var(--vscode-descriptionForeground);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
+  text-align: right;
+  user-select: none;
 }
 
 .plot-wrap {
@@ -558,6 +701,37 @@ body {
 .df-dims { color: var(--vscode-descriptionForeground); font-size: 11px; }
 .df-table-wrap { overflow-x: auto; max-height: 340px; overflow-y: auto; }
 .df-table { width: 100%; border-collapse: collapse; white-space: nowrap; }
+.df-table tbody tr { cursor: pointer; }
+.df-table tbody tr:hover td {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, .10));
+}
+.df-table tbody tr.df-row-selected td {
+  --df-selected-border: var(--vscode-focusBorder, #0078d4);
+  background: var(--vscode-list-activeSelectionBackground, rgba(0, 120, 212, .18));
+  color: var(--vscode-list-activeSelectionForeground, var(--vscode-editor-foreground));
+  box-shadow:
+    inset 0 2px 0 var(--df-selected-border),
+    inset 0 -2px 0 var(--df-selected-border);
+}
+.df-table tbody tr.df-row-selected td:first-child {
+  box-shadow:
+    inset 0 2px 0 var(--df-selected-border),
+    inset 0 -2px 0 var(--df-selected-border),
+    inset 2px 0 0 var(--df-selected-border);
+}
+.df-table tbody tr.df-row-selected td:last-child {
+  box-shadow:
+    inset 0 2px 0 var(--df-selected-border),
+    inset 0 -2px 0 var(--df-selected-border),
+    inset -2px 0 0 var(--df-selected-border);
+}
+.df-table tbody tr.df-row-selected td:first-child:last-child {
+  box-shadow:
+    inset 0 2px 0 var(--df-selected-border),
+    inset 0 -2px 0 var(--df-selected-border),
+    inset 2px 0 0 var(--df-selected-border),
+    inset -2px 0 0 var(--df-selected-border);
+}
 .df-table thead th {
   position: sticky;
   top: 0;
@@ -629,7 +803,7 @@ body {
 .toast {
   position: fixed;
   bottom: 20px;
-  right: 20px;
+  left: 20px;
   padding: 8px 14px;
   border-radius: 4px;
   font-size: 12px;

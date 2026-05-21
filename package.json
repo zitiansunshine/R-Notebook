@@ -2,7 +2,7 @@
   "name": "r-notebook",
   "displayName": "R Notebook",
   "description": "Native .Rmd, .qmd, and .ipynb support with inline console, plots, and paginated data frames",
-  "version": "1.2.2",
+  "version": "1.5.1",
   "publisher": "zitiansunsh1ne",
   "author": "Zitian(Andy)Wang",
   "__metadata": {
@@ -12,8 +12,13 @@
     "type": "git",
     "url": "https://github.com/zitiansunshine/R-Notebook"
   },
-  "engines": { "vscode": "^1.85.0" },
-  "categories": ["Programming Languages", "Notebooks"],
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Notebooks"
+  ],
   "icon": "icon-enhance.png",
   "main": "./out/extension.js",
   "activationEvents": [
@@ -25,6 +30,8 @@
     "onCommand:rNotebook.notebook.showVariables",
     "onCommand:rNotebook.notebook.clearOutputs",
     "onCommand:rNotebook.notebook.export",
+    "onCommand:rNotebook.notebook.selectAvailableRKernels",
+    "onCommand:rNotebook.notebook.selectAvailablePythonKernels",
     "onLanguage:r",
     "onLanguage:python"
   ],
@@ -32,8 +39,19 @@
     "languages": [
       {
         "id": "rmd",
-        "aliases": ["R Markdown", "RMarkdown", "rmarkdown", "Quarto", "quarto"],
-        "extensions": [".Rmd", ".rmd", ".Qmd", ".qmd"],
+        "aliases": [
+          "R Markdown",
+          "RMarkdown",
+          "rmarkdown",
+          "Quarto",
+          "quarto"
+        ],
+        "extensions": [
+          ".Rmd",
+          ".rmd",
+          ".Qmd",
+          ".qmd"
+        ],
         "configuration": "./language-configuration.json"
       }
     ],
@@ -43,11 +61,11 @@
         "scopeName": "text.html.markdown.rmd",
         "path": "./syntaxes/rmarkdown.tmLanguage.json",
         "embeddedLanguages": {
-          "source.yaml":   "yaml",
-          "source.r":      "r",
+          "source.yaml": "yaml",
+          "source.r": "r",
           "source.python": "python",
-          "source.shell":  "shellscript",
-          "source.sql":    "sql"
+          "source.shell": "shellscript",
+          "source.sql": "sql"
         }
       }
     ],
@@ -56,17 +74,27 @@
         "type": "rNotebook.rmarkdownNotebook",
         "displayName": "R Notebook",
         "selector": [
-          { "filenamePattern": "*.Rmd" },
-          { "filenamePattern": "*.rmd" },
-          { "filenamePattern": "*.Qmd" },
-          { "filenamePattern": "*.qmd" }
+          {
+            "filenamePattern": "*.Rmd"
+          },
+          {
+            "filenamePattern": "*.rmd"
+          },
+          {
+            "filenamePattern": "*.Qmd"
+          },
+          {
+            "filenamePattern": "*.qmd"
+          }
         ]
       },
       {
         "type": "rNotebook.pythonNotebook",
         "displayName": "Python Notebook",
         "selector": [
-          { "filenamePattern": "*.ipynb" }
+          {
+            "filenamePattern": "*.ipynb"
+          }
         ]
       }
     ],
@@ -75,10 +103,18 @@
         "viewType": "rNotebook.rmarkdownEditor",
         "displayName": "R Notebook Editor",
         "selector": [
-          { "filenamePattern": "*.Rmd" },
-          { "filenamePattern": "*.rmd" },
-          { "filenamePattern": "*.Qmd" },
-          { "filenamePattern": "*.qmd" }
+          {
+            "filenamePattern": "*.Rmd"
+          },
+          {
+            "filenamePattern": "*.rmd"
+          },
+          {
+            "filenamePattern": "*.Qmd"
+          },
+          {
+            "filenamePattern": "*.qmd"
+          }
         ],
         "priority": "option"
       }
@@ -131,6 +167,18 @@
         "command": "rNotebook.py.setCellFigureOptions",
         "title": "Python: Set Cell Figure Options (fig.width / fig.height / dpi)",
         "category": "R Notebook"
+      },
+      {
+        "command": "rNotebook.notebook.selectAvailableRKernels",
+        "title": "Select R Kernel",
+        "category": "R Notebook",
+        "icon": "$(server-environment)"
+      },
+      {
+        "command": "rNotebook.notebook.selectAvailablePythonKernels",
+        "title": "Select Python Kernel",
+        "category": "R Notebook",
+        "icon": "$(server-environment)"
       },
       {
         "command": "rNotebook.notebook.showVariables",
@@ -211,6 +259,35 @@
             "default": "Rscript",
             "description": "Default path to the Rscript executable used when a notebook has not selected a kernel yet"
           },
+          "rNotebook.r.additionalRPaths": {
+            "type": "array",
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "description": "Additional Rscript executable paths to show in the R Notebook kernel picker"
+          },
+          "rNotebook.r.defaultFigWidth": {
+            "type": "number",
+            "default": 7,
+            "minimum": 1,
+            "maximum": 20,
+            "description": "Default figure width in inches for R chunks that do not set fig.width"
+          },
+          "rNotebook.r.defaultFigHeight": {
+            "type": "number",
+            "default": 5,
+            "minimum": 1,
+            "maximum": 20,
+            "description": "Default figure height in inches for R chunks that do not set fig.height"
+          },
+          "rNotebook.r.defaultDpi": {
+            "type": "number",
+            "default": 120,
+            "minimum": 72,
+            "maximum": 600,
+            "description": "Default plot DPI for R chunks that do not set dpi"
+          },
           "rNotebook.r.execTimeoutMs": {
             "type": "number",
             "default": 0,
@@ -236,15 +313,15 @@
     ]
   },
   "scripts": {
-    "build":            "node esbuild.js",
-    "build:prod":       "node esbuild.js --prod",
-    "watch":            "node esbuild.js --watch",
-    "typecheck":        "tsc -p tsconfig.json --noEmit",
-    "test":             "vitest run",
-    "test:unit":        "vitest run test/rmdParser.test.ts",
+    "build": "node esbuild.js",
+    "build:prod": "node esbuild.js --prod",
+    "watch": "node esbuild.js --watch",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:unit": "vitest run test/rmdParser.test.ts",
     "test:integration": "vitest run test/rSessionManager.integration.test.ts",
-    "test:watch":       "vitest",
-    "package":          "vsce package"
+    "test:watch": "vitest",
+    "package": "vsce package"
   },
   "dependencies": {},
   "devDependencies": {

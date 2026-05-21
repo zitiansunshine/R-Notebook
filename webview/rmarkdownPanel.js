@@ -32,6 +32,8 @@
   let pendingCompletion = null;   // { ta, chunkId, cursorPos, codeView, gutterEl }
   let selectedAddLang   = 'r';   // currently chosen type for + Chunk button
   let varPanelOpen      = false;
+  let figDefaults       = { fig_width: 7, fig_height: 5, dpi: 120 };
+  let editVersion       = 0;
   const activeOutputTabs = new Map();
   const outputScrollState = new Map(); // Track scroll freeze state per output element
 
@@ -133,6 +135,7 @@
     switch (msg.type) {
 
       case 'init':
+        figDefaults = normalizeFigDefaults(msg.fig_defaults);
         currentChunks = msg.chunks;
         renderAll(msg.chunks);
         syncOutputs(msg.outputs || {});
@@ -147,6 +150,7 @@
       case 'chunk_running':
         setChunkState(msg.chunk_id, 'running');
         clearChunkOutput(msg.chunk_id);
+        if (msg.result) applyResult(msg.chunk_id, msg.result);
         break;
 
       case 'chunk_progress': {
@@ -266,6 +270,20 @@
 
   btnRPath.addEventListener('click', () => {
     vscode.postMessage({ type: 'set_r_path' });
+  });
+
+  window.addEventListener('keydown', (event) => {
+    const mod = event.metaKey || event.ctrlKey;
+    if (!mod || event.shiftKey || event.altKey || String(event.key).toLowerCase() !== 's') {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    postSaveDocument();
+  }, true);
+
+  window.addEventListener('blur', () => {
+    if (autoSaveTimer) postCodeChanged();
   });
 
   function addChunk(language) {
@@ -503,6 +521,9 @@
     ta.spellcheck = false;
     autoResizeTextarea(ta);
     ta.addEventListener('input', () => { autoResizeTextarea(ta); scheduleAutoSave(); });
+    ta.addEventListener('blur', () => {
+      if (autoSaveTimer) postCodeChanged();
+    });
 
     wrapper.append(label, ta);
     return wrapper;
@@ -525,7 +546,7 @@
     div.addEventListener('blur', () => {
       div.dataset.plainText = div.innerText;
       div.innerHTML = renderMarkdown(div.innerText);
-      scheduleAutoSave();
+      postCodeChanged();
     });
     div.addEventListener('input', () => scheduleAutoSave());
 
@@ -558,6 +579,22 @@
     if (evalIn) opts.eval = evalIn.checked;
     if (echoIn) opts.echo = echoIn.checked;
     return opts;
+  }
+
+  function normalizeFigDefaults(value) {
+    const fallback = { fig_width: 7, fig_height: 5, dpi: 120 };
+    if (!value || typeof value !== 'object') return fallback;
+    return {
+      fig_width: boundedNumber(value.fig_width, fallback.fig_width, 1, 20),
+      fig_height: boundedNumber(value.fig_height, fallback.fig_height, 1, 20),
+      dpi: boundedNumber(value.dpi, fallback.dpi, 72, 600),
+    };
+  }
+
+  function boundedNumber(value, fallback, min, max) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return fallback;
+    return Math.min(max, Math.max(min, numeric));
   }
 
   // ---- Code chunk ----------------------------------------------------------
@@ -658,21 +695,21 @@
     const figwInput = document.createElement('input');
     figwInput.type = 'number'; figwInput.className = 'opt-figw';
     figwInput.min = '1'; figwInput.max = '20'; figwInput.step = '0.5';
-    figwInput.placeholder = '7';
+    figwInput.placeholder = String(figDefaults.fig_width);
     if (chunk.options.fig_width != null) figwInput.value = chunk.options.fig_width;
     figwInput.addEventListener('input', scheduleAutoSave);
 
     const fighInput = document.createElement('input');
     fighInput.type = 'number'; fighInput.className = 'opt-figh';
     fighInput.min = '1'; fighInput.max = '20'; fighInput.step = '0.5';
-    fighInput.placeholder = '5';
+    fighInput.placeholder = String(figDefaults.fig_height);
     if (chunk.options.fig_height != null) fighInput.value = chunk.options.fig_height;
     fighInput.addEventListener('input', scheduleAutoSave);
 
     const dpiInput = document.createElement('input');
     dpiInput.type = 'number'; dpiInput.className = 'opt-dpi';
-    dpiInput.min = '72'; dpiInput.max = '300'; dpiInput.step = '10';
-    dpiInput.placeholder = '120';
+    dpiInput.min = '72'; dpiInput.max = '600'; dpiInput.step = '10';
+    dpiInput.placeholder = String(figDefaults.dpi);
     if (chunk.options.dpi != null) dpiInput.value = chunk.options.dpi;
     dpiInput.addEventListener('input', scheduleAutoSave);
 
@@ -787,6 +824,13 @@
       }
 
       if (mod) {
+        if (String(e.key).toLowerCase() === 's' && !e.shiftKey && !e.altKey) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          postSaveDocument();
+          return;
+        }
+
         // ── Cmd+A / Ctrl+A: select all text in this textarea ──────────────
         if (e.key === 'a') {
           e.preventDefault(); e.stopImmediatePropagation();
@@ -916,7 +960,10 @@
     });
 
     // Dismiss dropdown on blur
-    ta.addEventListener('blur', () => setTimeout(removeCompletionDropdown, 150));
+    ta.addEventListener('blur', () => {
+      if (autoSaveTimer) postCodeChanged();
+      setTimeout(removeCompletionDropdown, 150);
+    });
 
     editorMain.append(codeView, ta);
     editorWrap.append(progressBar, gutterEl, editorMain);
@@ -936,15 +983,34 @@
   // ---- Auto-save -----------------------------------------------------------
 
   function scheduleAutoSave() {
+    editVersion += 1;
     if (autoSaveTimer) clearTimeout(autoSaveTimer);
     autoSaveTimer = setTimeout(() => {
       postCodeChanged();
-    }, 600);
+    }, 500);
   }
 
   function postCodeChanged() {
+    if (autoSaveTimer) {
+      clearTimeout(autoSaveTimer);
+      autoSaveTimer = null;
+    }
     vscode.postMessage({
       type: 'code_changed',
+      version: editVersion,
+      fullText: reconstructFullText(),
+      chunks: collectCurrentChunks(),
+    });
+  }
+
+  function postSaveDocument() {
+    if (autoSaveTimer) {
+      clearTimeout(autoSaveTimer);
+      autoSaveTimer = null;
+    }
+    vscode.postMessage({
+      type: 'save_document',
+      version: editVersion,
       fullText: reconstructFullText(),
       chunks: collectCurrentChunks(),
     });
@@ -1321,10 +1387,23 @@
   function makeSingleOutput(chunkId, tab) {
     const frag = document.createDocumentFragment();
     if (tab.type === 'console' || tab.type === 'text') {
+      const wrap = document.createElement('div');
+      wrap.className = 'output-console-wrap';
+      const toolbar = document.createElement('div');
+      toolbar.className = 'output-console-toolbar';
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'output-copy-btn';
+      copyBtn.type = 'button';
+      copyBtn.textContent = 'Copy';
+      copyBtn.title = 'Copy all console output';
+      prepareOutputActionButton(copyBtn);
+      copyBtn.addEventListener('click', () => copyOutputText(tab.copyContent || tab.content, copyBtn));
       const pre = document.createElement('pre');
       pre.className = 'output-text';
       pre.textContent = tab.content;
-      frag.appendChild(pre);
+      toolbar.appendChild(copyBtn);
+      wrap.append(toolbar, pre);
+      frag.appendChild(wrap);
     } else if (tab.type === 'stderr') {
       const pre = document.createElement('pre');
       pre.className = 'output-stderr';
@@ -1347,10 +1426,7 @@
     } else if (tab.type === 'df') {
       frag.appendChild(makeDfViewer(chunkId, tab.content));
     } else if (tab.type === 'error') {
-      const pre = document.createElement('pre');
-      pre.className = 'output-error';
-      pre.textContent = '✖ ' + tab.content;
-      frag.appendChild(pre);
+      frag.appendChild(makeErrorOutput(chunkId, tab.content));
     }
     return frag;
   }
@@ -1364,10 +1440,170 @@
     if (oldConsoleEl) cleanupSmartScroll(oldConsoleEl);
 
     outputEl.innerHTML = '';
-    const pre = document.createElement('pre');
-    pre.className = 'output-error';
-    pre.textContent = '✖ ' + errorText;
-    outputEl.appendChild(pre);
+    outputEl.appendChild(makeErrorOutput(chunkId, errorText));
+  }
+
+  function makeErrorOutput(chunkId, text) {
+    const content = String(text ?? '');
+    const parsed = parseErrorText(content);
+    const wrap = document.createElement('div');
+    wrap.className = 'output-error-panel';
+
+    const toolbar = document.createElement('div');
+    toolbar.className = 'output-error-toolbar';
+    const title = document.createElement('strong');
+    title.textContent = 'Error';
+    const actions = document.createElement('div');
+    actions.className = 'output-error-actions';
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'output-copy-btn';
+    copyBtn.type = 'button';
+    copyBtn.textContent = 'Copy';
+    copyBtn.title = 'Copy full error output';
+    prepareOutputActionButton(copyBtn);
+    copyBtn.addEventListener('click', () => copyOutputText(content, copyBtn));
+    const openBtn = document.createElement('button');
+    openBtn.className = 'output-copy-btn';
+    openBtn.type = 'button';
+    openBtn.textContent = 'Open in Tab';
+    openBtn.title = 'Open error output in a new tab';
+    prepareOutputActionButton(openBtn);
+    openBtn.addEventListener('click', () => {
+      openOutputInTab(content, `Error: ${chunkId || 'chunk'}`);
+      blurOutputActionButton(openBtn);
+    });
+    actions.append(copyBtn, openBtn);
+    toolbar.append(title, actions);
+
+    const body = document.createElement('div');
+    body.className = 'output-error-body';
+    if (parsed.summary) {
+      const summary = document.createElement('div');
+      summary.className = 'output-error-summary';
+      const mark = document.createElement('span');
+      mark.className = 'output-error-mark';
+      mark.textContent = 'x';
+      const message = document.createElement('pre');
+      message.className = 'output-error-message';
+      message.textContent = parsed.summary;
+      summary.append(mark, message);
+      body.appendChild(summary);
+    }
+    if (parsed.details.length > 0) {
+      const details = document.createElement('details');
+      details.className = 'output-error-detail-wrap';
+      details.open = true;
+      const summary = document.createElement('summary');
+      summary.textContent = 'Details';
+      const pre = document.createElement('pre');
+      pre.className = 'output-error-detail';
+      pre.textContent = parsed.details.join('\n');
+      details.append(summary, pre);
+      body.appendChild(details);
+    }
+    if (parsed.frames.length > 0) {
+      const trace = document.createElement('div');
+      trace.className = 'output-error-trace';
+      const traceTitle = document.createElement('div');
+      traceTitle.className = 'output-error-trace-title';
+      traceTitle.textContent = 'Traceback';
+      const list = document.createElement('ol');
+      list.className = 'output-error-trace-list';
+      parsed.frames.forEach(frame => {
+        const item = document.createElement('li');
+        item.className = 'output-error-frame';
+        const no = document.createElement('span');
+        no.className = 'output-error-frame-no';
+        no.textContent = frame.index;
+        const code = document.createElement('pre');
+        code.className = 'output-error-frame-code';
+        code.textContent = frame.code;
+        item.append(no, code);
+        list.appendChild(item);
+      });
+      trace.append(traceTitle, list);
+      body.appendChild(trace);
+    }
+    if (!parsed.summary && parsed.details.length === 0 && parsed.frames.length === 0) {
+      const fallback = document.createElement('pre');
+      fallback.className = 'output-error-message';
+      fallback.textContent = content;
+      body.appendChild(fallback);
+    }
+    wrap.append(toolbar, body);
+    return wrap;
+  }
+
+  function openOutputInTab(content, title) {
+    vscode.postMessage({ type: 'open_output_in_tab', content: String(content ?? ''), title });
+  }
+
+  function blurOutputActionButton(button) {
+    if (!button || typeof button.blur !== 'function') return;
+    button.blur();
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => button.blur());
+    } else {
+      setTimeout(() => button.blur(), 0);
+    }
+  }
+
+  function prepareOutputActionButton(button) {
+    if (!button) return;
+    button.addEventListener('mousedown', (event) => {
+      event.preventDefault();
+    });
+    button.addEventListener('pointerup', () => {
+      blurOutputActionButton(button);
+    });
+  }
+
+  function copyOutputText(text, button) {
+    blurOutputActionButton(button);
+    const content = String(text ?? '');
+    if (vscode) {
+      vscode.postMessage({ type: 'copy_console', content });
+      flashCopyButton(button);
+      return;
+    }
+    const copyPromise = navigator.clipboard?.writeText
+      ? navigator.clipboard.writeText(content)
+      : legacyCopyText(content);
+    Promise.resolve(copyPromise)
+      .then(() => {
+        flashCopyButton(button);
+        showToast('Copied to ClipBoard', 'info');
+      })
+      .catch(() => flashCopyButton(button, 'Failed'));
+  }
+
+  function legacyCopyText(content) {
+    return new Promise((resolve, reject) => {
+      try {
+        const textarea = document.createElement('textarea');
+        textarea.value = content;
+        textarea.setAttribute('readonly', '');
+        textarea.style.position = 'fixed';
+        textarea.style.left = '-9999px';
+        document.body.appendChild(textarea);
+        textarea.select();
+        const ok = document.execCommand('copy');
+        textarea.remove();
+        ok ? resolve() : reject(new Error('copy failed'));
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+
+  function flashCopyButton(button, label = 'Copied') {
+    const original = button.textContent || 'Copy';
+    button.textContent = label;
+    button.disabled = true;
+    setTimeout(() => {
+      button.textContent = original;
+      button.disabled = false;
+    }, 1200);
   }
 
   function clearChunkOutput(chunkId) {
@@ -1410,8 +1646,14 @@
   function collectResultTabs(result) {
     const tabs = [];
     const consoleText = getConsoleText(result);
-    if (consoleText.trim()) {
-      tabs.push({ type: 'console', content: consoleText });
+    const consoleSegments = normalizeConsoleSegments(result.console_segments);
+    const sourceCode = normalizeSourceCode(result.source_code);
+    if (consoleText.trim() || consoleSegments.length > 0 || sourceCode) {
+      tabs.push({
+        type: 'console',
+        content: consoleText,
+        copyContent: getConsoleClipboardText(result),
+      });
     }
 
     const plots = Array.isArray(result.plots) ? result.plots : [];
@@ -1452,7 +1694,7 @@
     }
 
     if (result.error) {
-      tabs.push({ type: 'error', content: result.error });
+      tabs.push({ type: 'error', content: getErrorText(result) });
     }
 
     return tabs;
@@ -1466,6 +1708,97 @@
     const parts = [result.stdout || '', result.stderr || '']
       .filter(part => part.trim().length > 0);
     return parts.join(parts.length > 1 ? '\n' : '');
+  }
+
+  function getConsoleClipboardText(result) {
+    const fallbackOutput = getConsoleText(result);
+    const consoleSegments = normalizeConsoleSegments(result.console_segments);
+    const sourceCode = normalizeSourceCode(result.source_code);
+
+    if (consoleSegments.length > 0) {
+      const parts = [];
+      const segmentOutputs = [];
+      consoleSegments.forEach(segment => {
+        const code = normalizeSourceCode(segment.code);
+        const output = String(segment.output || '').replace(/\r\n/g, '\n').replace(/\s+$/g, '');
+        if (code) parts.push(formatSourceEcho(code));
+        if (output) {
+          parts.push(output);
+          segmentOutputs.push(output);
+        }
+      });
+      const transcriptOutput = segmentOutputs.join('\n');
+      if (fallbackOutput && fallbackOutput !== transcriptOutput) {
+        parts.push(fallbackOutput);
+      }
+      return parts.filter(Boolean).join('\n');
+    }
+
+    if (sourceCode) {
+      return [formatSourceEcho(sourceCode), fallbackOutput]
+        .filter(Boolean)
+        .join('\n');
+    }
+
+    return fallbackOutput;
+  }
+
+  function normalizeConsoleSegments(segments) {
+    if (!Array.isArray(segments)) return [];
+    return segments
+      .filter(segment => segment && typeof segment.code === 'string')
+      .map(segment => ({
+        code: segment.code,
+        output: typeof segment.output === 'string' ? segment.output : '',
+      }));
+  }
+
+  function normalizeSourceCode(text) {
+    return String(text || '').replace(/\s+$/g, '');
+  }
+
+  function formatSourceEcho(sourceCode) {
+    if (!sourceCode) return '';
+    return sourceCode
+      .split('\n')
+      .map(line => `> ${line}`)
+      .join('\n');
+  }
+
+  function getErrorText(result) {
+    const error = String(result.error || '').trim();
+    const trace = String(result.error_trace || '').trim();
+    if (!trace || trace === error) return error;
+    if (trace.startsWith(error)) return trace;
+    return `${error}\n\n${trace}`;
+  }
+
+  function parseErrorText(text) {
+    const normalized = String(text || '').replace(/\r\n/g, '\n').trim();
+    const lines = normalized.split('\n');
+    const traceIndex = lines.findIndex(line => /^traceback:\s*$/i.test(line.trim()));
+    const summaryLines = traceIndex >= 0 ? lines.slice(0, traceIndex) : lines;
+    const traceLines = traceIndex >= 0 ? lines.slice(traceIndex + 1) : [];
+    const nonEmptySummary = summaryLines.filter(line => line.trim().length > 0);
+    const summary = nonEmptySummary.shift() || '';
+    const details = nonEmptySummary;
+    const frames = [];
+
+    traceLines.forEach(line => {
+      const match = line.match(/^\s*(\d+):\s*(.*)$/);
+      if (match) {
+        frames.push({ index: match[1], code: match[2] || '' });
+        return;
+      }
+      if (frames.length > 0) {
+        const last = frames[frames.length - 1];
+        last.code = `${last.code}${last.code ? '\n' : ''}${line}`;
+      } else if (line.trim()) {
+        details.push(line);
+      }
+    });
+
+    return { summary, details, frames };
   }
 
   function previewConsoleText(text) {
@@ -1500,7 +1833,13 @@
 
     const tableWrap = document.createElement('div');
     tableWrap.className = 'df-table-wrap';
-    tableWrap.appendChild(buildDfTable(df));
+    tableWrap.appendChild(buildDfTable(df, wrap.dataset.selectedRowIndex));
+    tableWrap.addEventListener('click', e => {
+      const row = e.target.closest('tbody tr[data-row-index]');
+      if (!row || !tableWrap.contains(row)) return;
+      wrap.dataset.selectedRowIndex = row.dataset.rowIndex;
+      applyDfRowSelection(wrap);
+    });
 
     const paginator = document.createElement('div');
     paginator.className = 'df-paginator';
@@ -1518,7 +1857,7 @@
     return wrap;
   }
 
-  function buildDfTable(df) {
+  function buildDfTable(df, selectedRowIndex = '') {
     const table = document.createElement('table');
     table.className = 'df-table';
     const thead = table.createTHead();
@@ -1543,9 +1882,14 @@
     const startIdx = df.page * 50 + 1;
     df.data.forEach((row, i) => {
       const tr = tbody.insertRow();
+      const rowIndex = String(startIdx + i);
+      tr.dataset.rowIndex = rowIndex;
+      tr.tabIndex = 0;
+      tr.setAttribute('aria-selected', selectedRowIndex === rowIndex ? 'true' : 'false');
+      if (selectedRowIndex === rowIndex) tr.classList.add('df-row-selected');
       const idx = tr.insertCell();
       idx.className = 'row-idx';
-      idx.textContent = String(startIdx + i);
+      idx.textContent = rowIndex;
       for (const val of Object.values(row)) {
         const td = tr.insertCell();
         td.textContent = val === null ? 'NA' : String(val);
@@ -1553,6 +1897,15 @@
       }
     });
     return table;
+  }
+
+  function applyDfRowSelection(wrap) {
+    const selectedRowIndex = wrap.dataset.selectedRowIndex || '';
+    wrap.querySelectorAll('.df-table tbody tr[data-row-index]').forEach(row => {
+      const isSelected = row.dataset.rowIndex === selectedRowIndex;
+      row.classList.toggle('df-row-selected', isSelected);
+      row.setAttribute('aria-selected', isSelected ? 'true' : 'false');
+    });
   }
 
   function renderDfPage(msg) {
@@ -1564,7 +1917,7 @@
     wrap.dataset.totalPages  = String(msg.pages);
     const tableWrap = wrap.querySelector('.df-table-wrap');
     tableWrap.innerHTML = '';
-    tableWrap.appendChild(buildDfTable(msg));
+    tableWrap.appendChild(buildDfTable(msg, wrap.dataset.selectedRowIndex));
     updatePaginator(wrap.querySelector('.df-paginator'), msg);
   }
 

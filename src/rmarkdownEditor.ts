@@ -8,7 +8,11 @@ import { getOrCreateSession, disposeSession } from './rSessionManager';
 import { ExecResult, DfDataResult } from './kernelProtocol';
 import {
   RMARKDOWN_EDITOR_VIEW_TYPE,
+  getRAdditionalExecutablePaths,
   getRConfigValue,
+  getRFigureDefaults,
+  mergeRFigureOptions,
+  rememberRExecutablePath,
   updateRConfigValue,
 } from './extensionIds';
 import { pickRKernelPath } from './kernelDiscovery';
@@ -28,6 +32,8 @@ export class RMarkdownEditorProvider implements vscode.CustomTextEditorProvider 
   private readonly runQueues = new Map<string, Promise<void>>();
   private readonly runEpochs = new Map<string, number>();
   private readonly outputCaches = new Map<string, Map<string, ExecResult>>();
+  private readonly documentWriteQueues = new Map<string, Promise<void>>();
+  private readonly webviewTextVersions = new Map<string, number>();
 
   public static register(ctx: vscode.ExtensionContext): vscode.Disposable {
     const provider = new RMarkdownEditorProvider(ctx);
@@ -38,7 +44,11 @@ export class RMarkdownEditorProvider implements vscode.CustomTextEditorProvider 
     );
   }
 
-  constructor(private readonly ctx: vscode.ExtensionContext) {}
+  constructor(private readonly ctx: vscode.ExtensionContext) {
+    ctx.subscriptions.push(
+      vscode.workspace.onWillSaveTextDocument((event) => this.handleWillSaveTextDocument(event)),
+    );
+  }
 
   // ---- CustomTextEditorProvider --------------------------------------------
 
@@ -56,7 +66,12 @@ export class RMarkdownEditorProvider implements vscode.CustomTextEditorProvider 
     const { source, state } = splitRmdSourceAndState(document.getText());
     const chunks = parseRmd(source);
     this.resetOutputCache(outputCache, restoreChunkResults(chunks, state));
-    this.postMessage(panel, { type: 'init', chunks, outputs: this.serialiseCache(outputCache) });
+    this.postMessage(panel, {
+      type: 'init',
+      chunks,
+      outputs: this.serialiseCache(outputCache),
+      fig_defaults: getRFigureDefaults(),
+    });
 
     // Spin up R session (non-fatal: errors shown in the webview).
     // Store named listener references so they can be removed when the panel closes,
@@ -163,15 +178,54 @@ export class RMarkdownEditorProvider implements vscode.CustomTextEditorProvider 
           break;
         }
 
+        case 'copy_console': {
+          const content = typeof msg.content === 'string'
+            ? msg.content
+            : String(msg.content ?? '');
+          await vscode.env.clipboard.writeText(content);
+          void vscode.window.setStatusBarMessage('Copied to ClipBoard', 2000);
+          break;
+        }
+
+        case 'open_output_in_tab': {
+          const content = typeof msg.content === 'string'
+            ? msg.content
+            : String(msg.content ?? '');
+          const title = typeof msg.title === 'string' && msg.title
+            ? msg.title
+            : 'R Notebook Output';
+          const outputPanel = vscode.window.createWebviewPanel(
+            'rNotebook.consoleOutput',
+            title,
+            vscode.ViewColumn.Beside,
+            { enableScripts: true, retainContextWhenHidden: true },
+          );
+          const copyDisposable = outputPanel.webview.onDidReceiveMessage(async (panelMessage) => {
+            if (!panelMessage || typeof panelMessage !== 'object') return;
+            if (panelMessage.type !== 'copy_console') return;
+            const panelContent = typeof panelMessage.content === 'string'
+              ? panelMessage.content
+              : String(panelMessage.content ?? '');
+            await vscode.env.clipboard.writeText(panelContent);
+            void vscode.window.setStatusBarMessage('Copied to ClipBoard', 2000);
+            await outputPanel.webview.postMessage({ type: 'copy_console_done' });
+          });
+          outputPanel.onDidDispose(() => copyDisposable.dispose());
+          outputPanel.webview.html = buildTextTabHtml(title, content);
+          break;
+        }
+
         case 'set_r_path': {
           const current = getRConfigValue('rPath', 'Rscript');
           const newPath = await pickRKernelPath({
             currentPath: current,
+            additionalPaths: getRAdditionalExecutablePaths(),
             title: 'Select R Kernel (Rscript path)',
             placeHolder: current,
           });
           if (newPath !== undefined && newPath !== current) {
             await updateRConfigValue('rPath', newPath, vscode.ConfigurationTarget.Global);
+            await rememberRExecutablePath(newPath);
             session.setExecutablePath(newPath);
             await session.restart();
             this.postMessage(panel, { type: 'session_reset' });
@@ -262,21 +316,17 @@ export class RMarkdownEditorProvider implements vscode.CustomTextEditorProvider 
         }
 
         case 'code_changed': {
-          const chunks = Array.isArray(msg.chunks)
-            ? msg.chunks as RmdChunk[]
-            : parseRmd(msg.fullText);
-          const nextText = mergeRmdSourceAndState(
-            msg.fullText,
-            buildPersistedRmdStateFromChunks(chunks, outputCache),
-          );
-          // Reflect webview edits back to the TextDocument
-          const edit = new vscode.WorkspaceEdit();
-          edit.replace(
-            document.uri,
-            new vscode.Range(0, 0, document.lineCount, 0),
-            nextText,
-          );
-          vscode.workspace.applyEdit(edit);
+          await this.applyWebviewDocumentText(document, msg.fullText, msg.chunks, outputCache, msg.version, {
+            persistOutputs: false,
+          });
+          break;
+        }
+
+        case 'save_document': {
+          await this.applyWebviewDocumentText(document, msg.fullText, msg.chunks, outputCache, msg.version, {
+            persistOutputs: false,
+          });
+          await document.save();
           break;
         }
       }
@@ -385,28 +435,27 @@ export class RMarkdownEditorProvider implements vscode.CustomTextEditorProvider 
     }
 
     session.setExecTimeoutMs(this.execTimeoutMs());
-    outputCache.set(chunk.id, emptyExecResult(chunk.id));
-    this.postMessage(panel, { type: 'chunk_running', chunk_id: chunk.id });
+    const runningResult = emptyExecResult(chunk.id, chunk.code);
+    outputCache.set(chunk.id, runningResult);
+    this.postMessage(panel, { type: 'chunk_running', chunk_id: chunk.id, result: runningResult });
 
     try {
-      const liveResult = outputCache.get(chunk.id) ?? emptyExecResult(chunk.id);
+      const liveResult = outputCache.get(chunk.id) ?? emptyExecResult(chunk.id, chunk.code);
       const result = mergeConsoleResult(
-        await session.exec(chunk.id, chunk.code, chunk.options as any),
+        await session.exec(chunk.id, chunk.code, mergeRFigureOptions(chunk.options as Record<string, unknown>)),
         liveResult,
       );
       outputCache.set(chunk.id, result);
       this.postMessage(panel, { type: 'chunk_result', chunk_id: chunk.id, result });
       await this.persistDocumentState(document, sourceText, chunks, outputCache);
-      await session.vars().catch(() => undefined);
     } catch (err: any) {
-      outputCache.set(chunk.id, { ...emptyExecResult(chunk.id), error: err.message });
+      outputCache.set(chunk.id, { ...emptyExecResult(chunk.id, chunk.code), error: err.message });
       this.postMessage(panel, {
         type: 'chunk_result',
         chunk_id: chunk.id,
         error: err.message,
       });
       await this.persistDocumentState(document, sourceText, chunks, outputCache);
-      await session.vars().catch(() => undefined);
     }
   }
 
@@ -426,27 +475,134 @@ export class RMarkdownEditorProvider implements vscode.CustomTextEditorProvider 
     for (const [key, value] of next) target.set(key, value);
   }
 
+  private enqueueDocumentWrite(
+    docUri: string,
+    task: () => Promise<void>,
+  ): Promise<void> {
+    const previous = this.documentWriteQueues.get(docUri) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(task);
+    const tracked = next.finally(() => {
+      if (this.documentWriteQueues.get(docUri) === tracked) {
+        this.documentWriteQueues.delete(docUri);
+      }
+    });
+    this.documentWriteQueues.set(docUri, tracked);
+    return tracked;
+  }
+
+  private async applyWebviewDocumentText(
+    document: vscode.TextDocument,
+    fullText: unknown,
+    chunksValue: unknown,
+    outputCache: Map<string, ExecResult>,
+    versionValue?: unknown,
+    options?: { persistOutputs?: boolean },
+  ): Promise<void> {
+    const sourceText = typeof fullText === 'string'
+      ? fullText
+      : splitRmdSourceAndState(document.getText()).source;
+    const chunks = options?.persistOutputs
+      ? Array.isArray(chunksValue)
+        ? chunksValue as RmdChunk[]
+        : parseRmd(sourceText)
+      : [];
+    const docUri = document.uri.toString();
+    const version = typeof versionValue === 'number' && Number.isFinite(versionValue)
+      ? versionValue
+      : undefined;
+    if (version !== undefined && version < (this.webviewTextVersions.get(docUri) ?? -1)) {
+      return;
+    }
+    await this.enqueueDocumentWrite(docUri, async () => {
+      if (version !== undefined && version < (this.webviewTextVersions.get(docUri) ?? -1)) {
+        return;
+      }
+      const nextText = options?.persistOutputs
+        ? mergeRmdSourceAndState(
+          sourceText,
+          buildPersistedRmdStateFromChunks(chunks, outputCache),
+        )
+        : this.buildDocumentTextWithExistingPersistedState(document, sourceText);
+      if (document.getText() === nextText) {
+        if (version !== undefined) {
+          this.webviewTextVersions.set(docUri, version);
+        }
+        return;
+      }
+      const edit = new vscode.WorkspaceEdit();
+      edit.replace(
+        document.uri,
+        new vscode.Range(0, 0, document.lineCount, 0),
+        nextText,
+      );
+      const applied = await vscode.workspace.applyEdit(edit);
+      if (!applied) throw new Error('Failed to write R Markdown document changes.');
+      if (version !== undefined) {
+        this.webviewTextVersions.set(docUri, version);
+      }
+    });
+  }
+
   private async persistDocumentState(
     document: vscode.TextDocument,
-    sourceText: string,
-    chunks: RmdChunk[],
+    _sourceText: string,
+    _chunks: RmdChunk[],
     outputCache: Map<string, ExecResult>,
   ): Promise<void> {
+    const docUri = document.uri.toString();
+    await this.enqueueDocumentWrite(docUri, async () => {
+      const nextText = this.buildPersistedDocumentText(document, outputCache);
+      if (!nextText) return;
+      const edit = new vscode.WorkspaceEdit();
+      edit.replace(
+        document.uri,
+        new vscode.Range(0, 0, document.lineCount, 0),
+        nextText,
+      );
+      const applied = await vscode.workspace.applyEdit(edit);
+      if (!applied) throw new Error('Failed to persist R Markdown output state.');
+    });
+  }
+
+  private handleWillSaveTextDocument(event: vscode.TextDocumentWillSaveEvent): void {
+    const docUri = event.document.uri.toString();
+    const outputCache = this.outputCaches.get(docUri);
+    if (!outputCache) return;
+    if (this.runQueues.has(docUri)) return;
+
+    event.waitUntil((async () => {
+      const pending = this.documentWriteQueues.get(docUri);
+      if (pending) await pending.catch(() => undefined);
+      const nextText = this.buildPersistedDocumentText(event.document, outputCache);
+      if (!nextText) return [];
+      return [
+        vscode.TextEdit.replace(
+          new vscode.Range(0, 0, event.document.lineCount, 0),
+          nextText,
+        ),
+      ];
+    })());
+  }
+
+  private buildPersistedDocumentText(
+    document: vscode.TextDocument,
+    outputCache: Map<string, ExecResult>,
+  ): string | null {
     const { source: currentSource } = splitRmdSourceAndState(document.getText());
     const currentChunks = parseRmd(currentSource);
     const nextText = mergeRmdSourceAndState(
       currentSource,
       buildPersistedRmdStateFromChunks(currentChunks, outputCache),
     );
-    if (document.getText() === nextText) return;
+    return document.getText() === nextText ? null : nextText;
+  }
 
-    const edit = new vscode.WorkspaceEdit();
-    edit.replace(
-      document.uri,
-      new vscode.Range(0, 0, document.lineCount, 0),
-      nextText,
-    );
-    await vscode.workspace.applyEdit(edit);
+  private buildDocumentTextWithExistingPersistedState(
+    document: vscode.TextDocument,
+    sourceText: string,
+  ): string {
+    const { state } = splitRmdSourceAndState(document.getText());
+    return mergeRmdSourceAndState(sourceText, state);
   }
 
   private buildHtml(webview: vscode.Webview): string {
@@ -516,10 +672,12 @@ function getNonce(): string {
   return text;
 }
 
-function emptyExecResult(chunkId: string): ExecResult {
+function emptyExecResult(chunkId: string, sourceCode = ''): ExecResult {
   return {
     type: 'result',
     chunk_id: chunkId,
+    source_code: sourceCode,
+    console_segments: sourceCode ? [{ code: sourceCode, output: '' }] : [],
     console: '',
     stdout: '',
     stderr: '',
@@ -532,6 +690,98 @@ function emptyExecResult(chunkId: string): ExecResult {
 
 function mergeConsoleResult(result: ExecResult, liveResult: ExecResult): ExecResult {
   const liveConsole = liveResult.console ?? '';
-  if (result.console || !liveConsole) return result;
-  return { ...result, console: liveConsole };
+  return {
+    ...result,
+    source_code: result.source_code ?? liveResult.source_code,
+    console_segments: result.console_segments ?? liveResult.console_segments,
+    console: result.console || liveConsole || '',
+  };
+}
+
+function buildTextTabHtml(title: string, content: string): string {
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<style>
+body {
+  font-family: var(--vscode-font-family, -apple-system, sans-serif);
+  font-size: var(--vscode-font-size, 13px);
+  color: var(--vscode-editor-foreground);
+  background: var(--vscode-editor-background);
+  padding: 16px 20px;
+  margin: 0;
+}
+h1 { font-size: 15px; font-weight: 600; margin: 0 0 12px; }
+.toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+button {
+  background: var(--vscode-button-background, #0078d4);
+  color: var(--vscode-button-foreground, #fff);
+  border: 1px solid var(--vscode-button-background, #0078d4);
+  border-radius: 2px;
+  padding: 3px 9px;
+  font-size: 12px;
+  cursor: pointer;
+}
+#copy-status { color: var(--vscode-descriptionForeground); font-size: 12px; }
+pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
+  line-height: 1.45;
+}
+</style></head><body>
+<h1>${escapeHtml(title)}</h1>
+<div class="toolbar">
+  <button id="copy-output" type="button">Copy</button>
+  <span id="copy-status"></span>
+</div>
+<pre>${escapeHtml(content)}</pre>
+<script>
+(function () {
+  const content = ${escapeScriptJson(content)};
+  const vscode = typeof acquireVsCodeApi === 'function' ? acquireVsCodeApi() : null;
+  const button = document.getElementById('copy-output');
+  const status = document.getElementById('copy-status');
+  function showStatus(text) {
+    if (!status) return;
+    status.textContent = text;
+    setTimeout(() => { status.textContent = ''; }, 1800);
+  }
+  button?.addEventListener('click', async () => {
+    try {
+      if (vscode) {
+        vscode.postMessage({ type: 'copy_console', content });
+        return;
+      }
+      await navigator.clipboard.writeText(content);
+      showStatus('Copied to ClipBoard');
+    } catch {
+      showStatus('Copy failed');
+    }
+  });
+  window.addEventListener('message', (event) => {
+    if (event.data && event.data.type === 'copy_console_done') {
+      showStatus('Copied to ClipBoard');
+    }
+  });
+}());
+</script>
+</body></html>`;
+}
+
+function escapeHtml(value: string): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function escapeScriptJson(value: string): string {
+  return JSON.stringify(String(value ?? ''))
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e')
+    .replace(/&/g, '\\u0026')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
 }

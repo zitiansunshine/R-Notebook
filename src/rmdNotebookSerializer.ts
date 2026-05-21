@@ -24,7 +24,22 @@ type RmdCellMetadata = {
   kind?: 'yaml_frontmatter';
   options?: Record<string, unknown>;
   optionStyle?: ChunkOptionStyle;
+  rNotebookDisplayPadding?: boolean;
 };
+
+function codeForNotebookDisplay(code: string): { value: string; padded: boolean } {
+  if (!code || code.endsWith('\n')) {
+    return { value: code, padded: false };
+  }
+  return { value: `${code}\n`, padded: true };
+}
+
+function codeFromNotebookDisplay(value: string, metadata: RmdCellMetadata): string {
+  if (metadata.rNotebookDisplayPadding && value.endsWith('\n')) {
+    return value.slice(0, -1);
+  }
+  return value;
+}
 
 export function buildNotebookDataFromRmdText(text: string): vscode.NotebookData {
   return new vscode.NotebookData(buildNotebookCellsFromRmdText(text));
@@ -57,12 +72,17 @@ export function buildNotebookCellsFromRmdText(text: string): vscode.NotebookCell
       continue;
     }
 
+    const displayCode = codeForNotebookDisplay(chunk.code);
     const cell = new vscode.NotebookCellData(
       vscode.NotebookCellKind.Code,
-      chunk.code,
+      displayCode.value,
       chunk.language || 'r',
     );
-    cell.metadata = { options: chunk.options, optionStyle: chunk.optionStyle };
+    cell.metadata = {
+      options: chunk.options,
+      optionStyle: chunk.optionStyle,
+      ...(displayCode.padded ? { rNotebookDisplayPadding: true } : {}),
+    };
     cell.outputs = notebookOutputFromExecResult(restoredResults.get(chunk.id) ?? null, chunk.id);
     cells.push(cell);
   }
@@ -99,9 +119,10 @@ export class RmdNotebookSerializer implements vscode.NotebookSerializer {
         const meta = (cell.metadata ?? {}) as RmdCellMetadata;
         const lang = cell.languageId || 'r';
         const opts: Record<string, unknown> = meta.options ?? {};
-        parts.push(formatCodeChunk(lang, opts, cell.value, meta.optionStyle ?? 'rmd'));
+        const code = codeFromNotebookDisplay(cell.value, meta);
+        parts.push(formatCodeChunk(lang, opts, code, meta.optionStyle ?? 'rmd'));
         codeCellStates.push({
-          fingerprint: fingerprintNotebookCodeCell(lang, cell.value, opts),
+          fingerprint: fingerprintNotebookCodeCell(lang, code, opts),
           result: normalizePersistedExecResult(execResultFromCellOutputs(cell.outputs)),
         });
       }

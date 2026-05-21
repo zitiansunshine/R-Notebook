@@ -121,9 +121,13 @@ function fingerprintCodeCell(
 ): string {
   return JSON.stringify({
     language: (language || 'r').toLowerCase(),
-    code,
+    code: normalizeCodeForFingerprint(code),
     options: normalizeValue(options ?? {}),
   });
+}
+
+function normalizeCodeForFingerprint(code: string): string {
+  return code.replace(/\n+$/g, '');
 }
 
 function normalizeValue(value: unknown): unknown {

@@ -9,12 +9,17 @@ import {
 } from './rmdResultMapping';
 
 const STATE_MARKER = 'RNOTEBOOK_RMD_STATE';
+const STATE_BEGIN_MARKER = `${STATE_MARKER}_BEGIN`;
+const STATE_END_MARKER = `${STATE_MARKER}_END`;
 const LEGACY_STATE_MARKERS = [
   STATE_MARKER,
   'R_NOTEBOOK_RMD_STATE',
   'NOTA_RMD_STATE',
 ] as const;
 const STATE_BLOCK_RE = new RegExp(
+  String.raw`(?:\r?\n)?<!--\s*R Notebook saved outputs: do not edit\s*\r?\n\s*${escapeRegExp(STATE_BEGIN_MARKER)}\s*\r?\n\s*([A-Za-z0-9+/=\s]+?)\s*\r?\n\s*${escapeRegExp(STATE_END_MARKER)}\s*\r?\n\s*-->\s*$`,
+);
+const LEGACY_STATE_BLOCK_RE = new RegExp(
   String.raw`(?:\r?\n)?<!--\s*(${LEGACY_STATE_MARKERS.map(escapeRegExp).join('|')})(?:\s+([A-Za-z0-9+/=]+))?\s*-->\s*$`,
 );
 
@@ -53,7 +58,12 @@ export function mergeRmdSourceAndState(
 
   const payload = Buffer.from(JSON.stringify(normalized), 'utf8').toString('base64');
   const separator = base.length === 0 || base.endsWith('\n') ? '' : '\n';
-  return `${base}${separator}<!-- ${STATE_MARKER} ${payload} -->\n`;
+  return `${base}${separator}<!-- R Notebook saved outputs: do not edit
+${STATE_BEGIN_MARKER}
+${wrapBase64(payload)}
+${STATE_END_MARKER}
+-->
+`;
 }
 
 function stripTrailingStateBlocks(text: string): { source: string; payload?: string } {
@@ -62,10 +72,21 @@ function stripTrailingStateBlocks(text: string): { source: string; payload?: str
 
   while (true) {
     const match = source.match(STATE_BLOCK_RE);
-    if (!match || match.index == null) return { source, payload };
-    if (!payload && match[2]) payload = match[2];
-    source = source.slice(0, match.index);
+    if (match && match.index != null) {
+      if (!payload && match[1]) payload = match[1].replace(/\s+/g, '');
+      source = source.slice(0, match.index);
+      continue;
+    }
+
+    const legacyMatch = source.match(LEGACY_STATE_BLOCK_RE);
+    if (!legacyMatch || legacyMatch.index == null) return { source, payload };
+    if (!payload && legacyMatch[2]) payload = legacyMatch[2];
+    source = source.slice(0, legacyMatch.index);
   }
+}
+
+function wrapBase64(payload: string): string {
+  return payload.match(/.{1,100}/g)?.join('\n') ?? payload;
 }
 
 export function hasPersistedRmdState(text: string): boolean {
@@ -123,6 +144,10 @@ export function hasRenderableExecResult(
   result: ExecResult | null | undefined,
 ): result is ExecResult {
   return !!result && Boolean(
+    (result.source_code?.trim() ?? '') ||
+    (result.console_segments?.some(segment =>
+      Boolean(segment?.code?.trim() || segment?.output?.trim()),
+    ) ?? false) ||
     (result.console?.trim() ?? '') ||
     result.stdout.trim() ||
     result.stderr.trim() ||
@@ -164,6 +189,7 @@ function isExecResult(value: unknown): value is ExecResult {
     typeof candidate.stdout === 'string' &&
     typeof candidate.stderr === 'string' &&
     (candidate.error === null || typeof candidate.error === 'string') &&
+    (candidate.error_trace === undefined || candidate.error_trace === null || typeof candidate.error_trace === 'string') &&
     Array.isArray(candidate.plots) &&
     Array.isArray(candidate.dataframes) &&
     (candidate.plots_html === undefined || Array.isArray(candidate.plots_html))
