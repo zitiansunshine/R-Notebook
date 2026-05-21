@@ -253,6 +253,36 @@ describe('RSession constructor', () => {
     expect(s).toBeTruthy();
   });
 
+  it('retries soft interrupts while a chunk is still running', () => {
+    const s = new RSession('Rscript', 5000);
+    const sessionAny = s as any;
+    const proc = { kill: vi.fn() };
+    sessionAny.recoverAfterForcedInterrupt = vi.fn().mockResolvedValue(undefined);
+
+    sessionAny.proc = proc;
+    sessionAny.activeExecKey = 'chunk-1';
+
+    vi.useFakeTimers();
+    try {
+      s.interrupt();
+
+      expect(proc.kill).toHaveBeenCalledTimes(1);
+      expect(proc.kill).toHaveBeenCalledWith('SIGINT');
+      expect(s.isInterruptInProgress()).toBe(true);
+
+      vi.advanceTimersByTime(2_000);
+      expect(proc.kill).toHaveBeenCalledTimes(3);
+      expect(proc.kill).toHaveBeenNthCalledWith(2, 'SIGINT');
+      expect(proc.kill).toHaveBeenNthCalledWith(3, 'SIGINT');
+
+      vi.advanceTimersByTime(2_000);
+      expect(sessionAny.recoverAfterForcedInterrupt).toHaveBeenCalledWith('chunk-1');
+    } finally {
+      sessionAny.clearInterruptState();
+      vi.useRealTimers();
+    }
+  });
+
   it('continues execution when checkpointing times out', async () => {
     const s = new RSession('Rscript', 5000);
     const mockedExecResult = {
@@ -293,6 +323,65 @@ describe('RSession constructor', () => {
       'timeout-safe',
       5000,
     );
+  });
+
+  it('keeps marking successful execs as workspace-dirty for idle checkpointing', async () => {
+    const s = new RSession('Rscript', 5000);
+    const mockedExecResult = {
+      type: 'result',
+      chunk_id: 'checkpoint-readonly',
+      console: '',
+      stdout: '[1] 2\n',
+      stderr: '',
+      plots: [],
+      dataframes: [],
+      error: null,
+    };
+    const sessionAny = s as any;
+
+    sessionAny.started = true;
+    sessionAny.workspaceDirty = true;
+    sessionAny.hasCheckpoint = false;
+    sessionAny.start = vi.fn().mockResolvedValue(undefined);
+    sessionAny.sendWait = vi.fn().mockResolvedValue(mockedExecResult);
+
+    const result = await s.exec('checkpoint-readonly', 'value');
+
+    expect(result).toEqual(mockedExecResult);
+    expect(sessionAny.sendWait).toHaveBeenCalledTimes(1);
+    expect(sessionAny.sendWait).toHaveBeenCalledWith(
+      { type: 'exec', chunk_id: 'checkpoint-readonly', code: 'value' },
+      'checkpoint-readonly',
+      5000,
+    );
+    expect(sessionAny.workspaceDirty).toBe(true);
+  });
+
+  it('reports recovery checkpoint freshness', async () => {
+    const s = new RSession('Rscript', 5000);
+    const sessionAny = s as any;
+
+    sessionAny.hasCheckpoint = false;
+    expect(s.recoveryCheckpointState()).toBe('none');
+
+    sessionAny.hasCheckpoint = true;
+    sessionAny.workspaceDirty = false;
+    expect(s.recoveryCheckpointState()).toBe('current');
+
+    sessionAny.workspaceDirty = true;
+    expect(s.recoveryCheckpointState()).toBe('stale');
+  });
+
+  it('forceInterruptAndRecover only escalates when a chunk is active', async () => {
+    const s = new RSession('Rscript', 5000);
+    const sessionAny = s as any;
+
+    sessionAny.activeExecKey = 'chunk-1';
+    sessionAny.proc = {};
+    sessionAny.recoverAfterForcedInterrupt = vi.fn().mockResolvedValue(undefined);
+
+    await s.forceInterruptAndRecover();
+    expect(sessionAny.recoverAfterForcedInterrupt).toHaveBeenCalledWith('chunk-1');
   });
 });
 

@@ -19,10 +19,18 @@ export class RmdOutputStore {
     this.hardResetUris.add(docUri);
   }
 
+  hasHardReset(docUri: string): boolean {
+    return this.hardResetUris.has(docUri);
+  }
+
+  finishHardReset(docUri: string): void {
+    this.hardResetUris.delete(docUri);
+  }
+
   applyNotebookChange(event: vscode.NotebookDocumentChangeEvent): void {
     const docUri = event.notebook.uri.toString();
     const next = new Map(this.results.get(docUri) ?? []);
-    const suppressTransfer = this.hardResetUris.delete(docUri);
+    const suppressTransfer = event.contentChanges.length > 0 && this.hardResetUris.has(docUri);
 
     for (const contentChange of event.contentChanges) {
       const removedStates: StoredExecResultState[] = [];
@@ -79,6 +87,7 @@ export class RmdOutputStore {
     }
 
     this.syncNotebook(event.notebook, next);
+    if (suppressTransfer) this.finishHardReset(docUri);
     if (next.size === 0) {
       this.results.delete(docUri);
     } else {
@@ -88,6 +97,8 @@ export class RmdOutputStore {
 
   getForNotebook(notebook: vscode.NotebookDocument): Map<number, ExecResult> {
     const docUri = notebook.uri.toString();
+    if (this.hardResetUris.has(docUri)) return new Map();
+
     const stored = this.results.get(docUri);
     const restored = new Map<number, ExecResult>();
 
@@ -260,6 +271,7 @@ function isExecResult(value: unknown): value is ExecResult {
     typeof candidate.stdout === 'string' &&
     typeof candidate.stderr === 'string' &&
     (candidate.error === null || typeof candidate.error === 'string') &&
+    (candidate.error_trace === undefined || candidate.error_trace === null || typeof candidate.error_trace === 'string') &&
     Array.isArray(candidate.plots) &&
     Array.isArray(candidate.dataframes) &&
     (candidate.plots_html === undefined || Array.isArray(candidate.plots_html))
@@ -268,6 +280,10 @@ function isExecResult(value: unknown): value is ExecResult {
 
 function hasRenderableExecResult(result: ExecResult): boolean {
   return Boolean(
+    (result.source_code?.trim() ?? '') ||
+    (result.console_segments?.some(segment =>
+      Boolean(segment?.code?.trim() || segment?.output?.trim()),
+    ) ?? false) ||
     (result.console?.trim() ?? '') ||
     result.stdout.trim() ||
     result.stderr.trim() ||

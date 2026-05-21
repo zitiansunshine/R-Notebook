@@ -20,7 +20,7 @@ interface PendingRequest {
   timeout: ReturnType<typeof setTimeout> | undefined;
 }
 
-const IDLE_CHECKPOINT_DELAY_MS = 10_000;
+const IDLE_CHECKPOINT_DELAY_MS = 45_000;
 
 function sanitizeExecTimeoutMs(timeoutMs?: number): number {
   if (typeof timeoutMs === 'number' && timeoutMs === 0) return 0;
@@ -53,6 +53,7 @@ export class RSession extends EventEmitter {
   private recoveryPromise: Promise<void> | null = null;
   private checkpointTimer: ReturnType<typeof setTimeout> | null = null;
   private checkpointPromise: Promise<void> | null = null;
+  private lastUserActivityAt = Date.now();
 
   /** exec_timeout_ms: per-chunk max execution time */
   constructor(
@@ -92,6 +93,12 @@ export class RSession extends EventEmitter {
     this.interruptAttempts = 1;
     this.signalRunningProcess('SIGINT');
     this.scheduleInterruptRetry(this.activeExecKey);
+  }
+
+  async forceInterruptAndRecover(): Promise<void> {
+    const chunkId = this.activeExecKey;
+    if (!chunkId || !this.proc) return;
+    await this.recoverAfterForcedInterrupt(chunkId);
   }
 
   async stop(): Promise<void> {
@@ -135,6 +142,15 @@ export class RSession extends EventEmitter {
     return this.activeExecKey !== null;
   }
 
+  isInterruptInProgress(): boolean {
+    return this.interruptingExecKey !== null && this.interruptingExecKey === this.activeExecKey;
+  }
+
+  recoveryCheckpointState(): 'current' | 'stale' | 'none' {
+    if (!this.hasCheckpoint) return 'none';
+    return this.workspaceDirty ? 'stale' : 'current';
+  }
+
   private varsTimeoutMs(): number {
     return Math.max(60_000, Math.min(this.execTimeoutMs, 300_000));
   }
@@ -151,6 +167,7 @@ export class RSession extends EventEmitter {
   }
 
   async reset(): Promise<ExecResult> {
+    this.noteUserActivity();
     await this.start();
     this.lastVars = { type: 'vars_result', vars: [] };
     this.workspaceDirty = false;
@@ -165,7 +182,9 @@ export class RSession extends EventEmitter {
     code: string,
     opts?: { fig_width?: number; fig_height?: number; dpi?: number },
   ): Promise<ExecResult> {
+    this.noteUserActivity();
     await this.start();
+    await this.ensureRecoveryCheckpointBeforeExec();
     const req: KernelRequest = {
       type: 'exec',
       chunk_id: chunkId,
@@ -192,6 +211,7 @@ export class RSession extends EventEmitter {
   async dfPage(
     chunkId: string, name: string, page: number, pageSize = 50
   ): Promise<DfDataResult> {
+    this.noteUserActivity();
     await this.start();
     const req: KernelRequest = {
       type: 'df_page', chunk_id: chunkId, name, page, page_size: pageSize,
@@ -201,6 +221,7 @@ export class RSession extends EventEmitter {
 
   async vars(): Promise<VarsResult> {
     if (this.activeExecKey) return this.lastVars;
+    this.noteUserActivity();
     await this.start();
     const result = await this.sendWait({ type: 'vars' }, '__vars__', this.varsTimeoutMs()) as VarsResult;
     this.lastVars = result;
@@ -209,6 +230,7 @@ export class RSession extends EventEmitter {
 
   async complete(chunkId: string, code: string, cursorPos: number): Promise<string[]> {
     if (this.activeExecKey) return [];
+    this.noteUserActivity();
     await this.start();
     const requestChunkId = `${chunkId}:cmp:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`;
     const req: KernelRequest = {
@@ -221,10 +243,10 @@ export class RSession extends EventEmitter {
   async keepAlive(): Promise<void> {
     if (this.activeExecKey) return;
     await this.start();
-    if (this.workspaceDirty && !this.checkpointingDisabled) {
-      await this.ensureWorkspaceCheckpoint();
-    }
     await this.sendWait({ type: 'ping' }, '__ping__', 5_000);
+    if (this.workspaceDirty && !this.checkpointingDisabled && this.isPastCheckpointIdleWindow()) {
+      void this.ensureWorkspaceCheckpoint();
+    }
   }
 
   // ---- Internal machinery --------------------------------------------------
@@ -364,10 +386,24 @@ export class RSession extends EventEmitter {
     await this.beginRecoveryFromCheckpoint();
   }
 
-  private async ensureWorkspaceCheckpoint(): Promise<void> {
+  private async ensureRecoveryCheckpointBeforeExec(): Promise<void> {
     if (!this.workspaceDirty || this.checkpointingDisabled) return;
+    if (this.recoveryPromise) {
+      await this.recoveryPromise;
+      return;
+    }
+    await this.ensureWorkspaceCheckpointNow();
+  }
+
+  private async ensureWorkspaceCheckpointNow(): Promise<void> {
+    if (this.checkpointingDisabled) return;
     if (this.activeExecKey || this.recoveryPromise) return;
-    if (this.checkpointPromise) return this.checkpointPromise;
+    if (this.checkpointPromise) {
+      await this.checkpointPromise;
+      return;
+    }
+
+    this.clearScheduledCheckpoint();
 
     const snapshotTask = (async () => {
       let snapshot: any;
@@ -410,7 +446,19 @@ export class RSession extends EventEmitter {
       }
     });
     this.checkpointPromise = trackedTask;
-    return trackedTask;
+    await trackedTask;
+  }
+
+  private async ensureWorkspaceCheckpoint(): Promise<void> {
+    if (!this.workspaceDirty || this.checkpointingDisabled) return;
+    if (this.activeExecKey || this.recoveryPromise) return;
+    if (this.checkpointPromise) return this.checkpointPromise;
+    if (!this.isPastCheckpointIdleWindow()) {
+      this.scheduleWorkspaceCheckpoint(this.remainingCheckpointIdleDelay());
+      return;
+    }
+
+    return this.ensureWorkspaceCheckpointNow();
   }
 
   private disableCheckpointing(): void {
@@ -439,6 +487,19 @@ export class RSession extends EventEmitter {
       clearTimeout(this.checkpointTimer);
       this.checkpointTimer = null;
     }
+  }
+
+  private noteUserActivity(): void {
+    this.lastUserActivityAt = Date.now();
+    this.clearScheduledCheckpoint();
+  }
+
+  private isPastCheckpointIdleWindow(): boolean {
+    return Date.now() - this.lastUserActivityAt >= IDLE_CHECKPOINT_DELAY_MS;
+  }
+
+  private remainingCheckpointIdleDelay(): number {
+    return Math.max(1_000, IDLE_CHECKPOINT_DELAY_MS - (Date.now() - this.lastUserActivityAt));
   }
 
   private deleteCheckpointFile(): void {

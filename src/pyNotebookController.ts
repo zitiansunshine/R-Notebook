@@ -20,10 +20,8 @@ import {
 import { ExecResult, StreamMessage } from './kernelProtocol';
 import { notebookOutputItemsFromExecResult } from './rmdOutputStore';
 import {
-  discoverPythonKernels,
+  discoverPythonKernelsAsync,
   fallbackKernelName,
-  fallbackPythonDescription,
-  fallbackPythonLabel,
   PythonKernelDescriptor,
 } from './kernelDiscovery';
 
@@ -65,39 +63,73 @@ type NotebookPythonMetadata = {
   [key: string]: unknown;
 };
 
+type RememberedPyNotebookKernel = {
+  pythonPath: string;
+  controllerId: string;
+  kernelspecName?: string;
+  displayName: string;
+};
+
+type PyKernelActionDescriptor = {
+  id: 'action:manual';
+  label: string;
+  description?: string;
+  detail?: string;
+  action: 'manual';
+};
+
+type PyControllerDescriptor = PythonKernelDescriptor | PyKernelActionDescriptor;
+
 type PyControllerEntry = {
   controller: vscode.NotebookController;
-  descriptor: PythonKernelDescriptor;
+  descriptor: PyControllerDescriptor;
   selectionDisposable: vscode.Disposable;
 };
+
+function isActionDescriptor(descriptor: PyControllerDescriptor): descriptor is PyKernelActionDescriptor {
+  return 'action' in descriptor;
+}
+
+const OUTPUT_UPDATE_TIMEOUT_MS = 2_000;
+const PY_NOTEBOOK_SELECTIONS_STATE_KEY = 'pythonNotebookSelections';
 
 export class PyNotebookController implements vscode.Disposable {
   private readonly controllers = new Map<string, PyControllerEntry>();
   private readonly liveExecutions = new Map<string, LiveExecutionState>();
   private readonly notebookQueues = new Map<string, Promise<void>>();
   private readonly queueEpochs = new Map<string, number>();
+  private readonly rememberedNotebookSelections = new Map<string, RememberedPyNotebookKernel>();
   private readonly boundSessions = new WeakSet<object>();
   private readonly disposables: vscode.Disposable[] = [];
   private readonly extensionId: string;
+  private readonly workspaceState: vscode.Memento;
   private kernelDescriptors: PythonKernelDescriptor[] = [];
   private executionOrder = 0;
   private renderInterval: ReturnType<typeof setInterval> | null = null;
   private varNotifier?: VariableNotifier;
+  private kernelCatalogRefreshSeq = 0;
 
   constructor(ctx: vscode.ExtensionContext, varNotifier?: VariableNotifier) {
     this.extensionId = ctx.extension.id;
+    this.workspaceState = ctx.workspaceState;
     this.varNotifier = varNotifier;
-    this.refreshKernelCatalog();
+    this.restoreRememberedNotebookSelections();
+    void this.refreshKernelCatalog();
     this.disposables.push(
       vscode.workspace.onDidOpenNotebookDocument((notebook) => {
         this.syncNotebookAffinities(notebook);
       }),
       vscode.workspace.onDidChangeConfiguration((event) => {
         if (affectsPythonConfig(event, 'pythonPath')) {
-          this.refreshKernelCatalog();
+          void this.refreshKernelCatalog();
         }
       }),
     );
+  }
+
+  public async forgetNotebookSelection(docUri: string): Promise<void> {
+    if (!this.rememberedNotebookSelections.delete(docUri)) return;
+    await this.persistRememberedNotebookSelections();
   }
 
   public async showKernelPicker(
@@ -113,7 +145,7 @@ export class PyNotebookController implements vscode.Disposable {
       : activeNotebook?.notebookType === PY_NOTEBOOK_TYPE
         ? activeNotebook
         : undefined;
-    const includeManual = options?.includeManual ?? false;
+    const includeManual = options?.includeManual ?? true;
 
     const descriptors = this.availableDescriptors();
     const currentDescriptor = targetNotebook
@@ -185,50 +217,42 @@ export class PyNotebookController implements vscode.Disposable {
     }
 
     await updatePythonConfigValue('pythonPath', descriptor.pythonPath, vscode.ConfigurationTarget.Global);
-    this.refreshKernelCatalog();
+    void this.refreshKernelCatalog();
     vscode.window.showInformationMessage(`Python path set to: ${descriptor.pythonPath}`);
   }
 
-  private refreshKernelCatalog(): void {
-    this.kernelDescriptors = discoverPythonKernels(this.pyBinPath());
+  private async refreshKernelCatalog(): Promise<void> {
+    const refreshSeq = ++this.kernelCatalogRefreshSeq;
+    const configuredPython = this.pyBinPath();
+    if (this.kernelDescriptors.length === 0) {
+      this.installKernelCatalog([this.manualDescriptor(configuredPython)]);
+    }
+
+    const discovered = await discoverPythonKernelsAsync(configuredPython);
+    if (refreshSeq !== this.kernelCatalogRefreshSeq) return;
+    this.installKernelCatalog(discovered.length > 0
+      ? discovered
+      : [this.manualDescriptor(configuredPython)]);
+  }
+
+  private installKernelCatalog(descriptors: PythonKernelDescriptor[]): void {
+    this.kernelDescriptors = descriptors;
     const nextIds = new Set<string>();
 
     for (const descriptor of this.kernelDescriptors) {
-      const controllerId = this.controllerIdForDescriptor(descriptor);
+      const controllerId = this.ensureControllerForDescriptor(descriptor).controller.id;
       nextIds.add(controllerId);
-
-      const existing = this.controllers.get(controllerId);
-      if (existing) {
-        existing.descriptor = descriptor;
-        existing.controller.label = descriptor.displayName;
-        existing.controller.description = descriptor.description ?? `${EXTENSION_BRAND} Python Kernel`;
-        existing.controller.detail = descriptor.pythonPath;
-        continue;
-      }
-
-      const controller = vscode.notebooks.createNotebookController(
-        controllerId,
-        PY_NOTEBOOK_TYPE,
-        descriptor.displayName,
-      );
-      controller.supportedLanguages = ['python'];
-      controller.supportsExecutionOrder = true;
-      controller.description = descriptor.description ?? `${EXTENSION_BRAND} Python Kernel`;
-      controller.detail = descriptor.pythonPath;
-      controller.executeHandler = (cells, notebook, activeController) =>
-        this.execute(activeController, cells, notebook);
-      controller.interruptHandler = (notebook) => {
-        this.interruptNotebook(notebook.uri.toString());
-      };
-
-      const selectionDisposable = controller.onDidChangeSelectedNotebooks((event) => {
-        if (!event.selected) return;
-        const selectedDescriptor = this.controllers.get(controller.id)?.descriptor ?? descriptor;
-        void this.handleControllerSelection(event.notebook, selectedDescriptor, controller.id);
-      });
-
-      this.controllers.set(controllerId, { controller, descriptor, selectionDisposable });
     }
+
+    for (const notebook of vscode.workspace.notebookDocuments) {
+      if (notebook.notebookType !== PY_NOTEBOOK_TYPE) continue;
+      const descriptor = this.descriptorFromNotebookMetadata(notebook);
+      if (!descriptor) continue;
+      const controllerId = this.ensureControllerForDescriptor(descriptor).controller.id;
+      nextIds.add(controllerId);
+    }
+
+    nextIds.add(this.ensureManualPathController().controller.id);
 
     for (const [controllerId, entry] of this.controllers) {
       if (nextIds.has(controllerId)) continue;
@@ -244,6 +268,39 @@ export class PyNotebookController implements vscode.Disposable {
     return getPythonConfigValue('pythonPath', 'python3');
   }
 
+  private restoreRememberedNotebookSelections(): void {
+    const stored = this.workspaceState.get<Record<string, unknown>>(
+      PY_NOTEBOOK_SELECTIONS_STATE_KEY,
+      {},
+    );
+    for (const [docUri, value] of Object.entries(stored)) {
+      const selection = parseRememberedSelection(value);
+      if (!selection) continue;
+      this.rememberedNotebookSelections.set(docUri, selection);
+    }
+  }
+
+  private async persistRememberedNotebookSelections(): Promise<void> {
+    await this.workspaceState.update(
+      PY_NOTEBOOK_SELECTIONS_STATE_KEY,
+      Object.fromEntries(this.rememberedNotebookSelections.entries()),
+    );
+  }
+
+  private async rememberNotebookSelection(
+    docUri: string,
+    descriptor: PythonKernelDescriptor,
+    controllerId = this.controllerIdForDescriptor(descriptor),
+  ): Promise<void> {
+    this.rememberedNotebookSelections.set(docUri, {
+      pythonPath: descriptor.pythonPath,
+      controllerId,
+      kernelspecName: descriptor.kernelspecName,
+      displayName: descriptor.displayName,
+    });
+    await this.persistRememberedNotebookSelections();
+  }
+
   private execTimeoutMs(): number {
     return getPythonConfigValue('execTimeoutMs', 3_000_000) ?? 3_000_000;
   }
@@ -253,8 +310,10 @@ export class PyNotebookController implements vscode.Disposable {
     cells: vscode.NotebookCell[],
     notebook: vscode.NotebookDocument,
   ): Promise<void> {
-    const descriptor = this.controllerEntryForController(controller)?.descriptor
-      ?? this.resolveDescriptorForNotebook(notebook);
+    const selectedDescriptor = this.controllerEntryForController(controller)?.descriptor;
+    const descriptor = selectedDescriptor && !isActionDescriptor(selectedDescriptor)
+      ? selectedDescriptor
+      : this.resolveDescriptorForNotebook(notebook);
     const docUri = notebook.uri.toString();
     return this.enqueueNotebookExecution(docUri, (runEpoch) =>
       this.runQueuedExecution(docUri, runEpoch, descriptor, controller, cells, notebook),
@@ -280,9 +339,6 @@ export class PyNotebookController implements vscode.Disposable {
     let startError: Error | undefined;
     try {
       await session.start();
-      if (session.cachedVars().vars.length === 0) {
-        await this.refreshVariableCache(session);
-      }
     } catch (err: any) {
       startError = err instanceof Error ? err : new Error(String(err));
     }
@@ -312,6 +368,7 @@ export class PyNotebookController implements vscode.Disposable {
       const cancelDisp = execution.token.onCancellationRequested(() => session.interrupt());
 
       try {
+        await this.clearExecutionOutputForNewRun(liveState);
         await this.replaceExecutionOutput(liveState, liveState.result, chunkId, { running: true });
         if (startError) throw startError;
         const result = mergeConsoleResult(await session.exec(chunkId, code, {
@@ -323,7 +380,6 @@ export class PyNotebookController implements vscode.Disposable {
         await this.waitForPendingRender(liveState);
         await this.replaceExecutionOutput(liveState, result, chunkId);
         execution.end(!result.error, Date.now());
-        await this.refreshVariableCache(session);
       } catch (err: any) {
         liveState.completed = true;
         await this.waitForPendingRender(liveState);
@@ -332,7 +388,6 @@ export class PyNotebookController implements vscode.Disposable {
           error: err.message,
         }, chunkId);
         execution.end(false, Date.now());
-        await this.refreshVariableCache(session);
       } finally {
         cancelDisp.dispose();
         this.liveExecutions.delete(liveKey);
@@ -343,6 +398,14 @@ export class PyNotebookController implements vscode.Disposable {
 
     // Notify variable provider so the Variables panel refreshes
     this.varNotifier?.notifyChanged(notebook);
+  }
+
+  private async clearExecutionOutputForNewRun(state: LiveExecutionState): Promise<void> {
+    state.output = null;
+    await this.withOutputTimeout(
+      state.execution.clearOutput(),
+      'clearOutput',
+    ).catch(() => undefined);
   }
 
   private enqueueNotebookExecution(
@@ -370,6 +433,17 @@ export class PyNotebookController implements vscode.Disposable {
     this.bumpQueueEpoch(docUri);
     session?.interrupt();
     return interrupted;
+  }
+
+  public hasPendingExecution(docUri: string): boolean {
+    if (this.notebookQueues.has(docUri)) return true;
+    const session = getPySession(docUri);
+    if (session?.isBusy()) return true;
+    const prefix = `${docUri}::`;
+    for (const liveKey of this.liveExecutions.keys()) {
+      if (liveKey.startsWith(prefix)) return true;
+    }
+    return false;
   }
 
   public async restartNotebook(notebook: vscode.NotebookDocument): Promise<boolean> {
@@ -471,24 +545,123 @@ export class PyNotebookController implements vscode.Disposable {
 
   private availableDescriptors(): PythonKernelDescriptor[] {
     if (this.kernelDescriptors.length === 0) {
-      this.refreshKernelCatalog();
+      this.installKernelCatalog([this.manualDescriptor(this.pyBinPath())]);
+      void this.refreshKernelCatalog();
     }
     return this.kernelDescriptors;
   }
 
-  private manualDescriptor(pythonPath: string): PythonKernelDescriptor {
+  private manualDescriptor(
+    pythonPath: string,
+    overrides?: {
+      displayName?: string;
+      kernelspecName?: string;
+    },
+  ): PythonKernelDescriptor {
+    const displayName = overrides?.displayName ?? simplePythonLabel(pythonPath);
     return {
       id: `executable:${pythonPath}`,
-      label: fallbackPythonLabel(pythonPath),
-      description: fallbackPythonDescription(pythonPath),
+      label: displayName,
+      description: 'Python environment',
       detail: pythonPath,
       env: undefined,
       environmentType: undefined,
       pythonPath,
-      displayName: fallbackPythonLabel(pythonPath),
-      kernelspecName: fallbackKernelName(pythonPath),
+      displayName,
+      kernelspecName: overrides?.kernelspecName ?? fallbackKernelName(pythonPath),
       source: 'executable',
     };
+  }
+
+  private ensureControllerForDescriptor(descriptor: PythonKernelDescriptor): PyControllerEntry {
+    const controllerId = this.controllerIdForDescriptor(descriptor);
+    const existingDescriptorIndex = this.kernelDescriptors.findIndex((candidate) =>
+      candidate.id === descriptor.id,
+    );
+    if (existingDescriptorIndex >= 0) {
+      this.kernelDescriptors[existingDescriptorIndex] = descriptor;
+    } else {
+      this.kernelDescriptors.push(descriptor);
+    }
+
+    const existing = this.controllers.get(controllerId);
+    if (existing) {
+      existing.descriptor = descriptor;
+      existing.controller.label = descriptor.displayName;
+      existing.controller.description = descriptor.description ?? `${EXTENSION_BRAND} Python Kernel`;
+      existing.controller.detail = descriptor.pythonPath;
+      return existing;
+    }
+
+    const controller = vscode.notebooks.createNotebookController(
+      controllerId,
+      PY_NOTEBOOK_TYPE,
+      descriptor.displayName,
+    );
+    controller.supportedLanguages = ['python'];
+    controller.supportsExecutionOrder = true;
+    controller.description = descriptor.description ?? `${EXTENSION_BRAND} Python Kernel`;
+    controller.detail = descriptor.pythonPath;
+    controller.executeHandler = (cells, notebook, activeController) =>
+      this.execute(activeController, cells, notebook);
+    controller.interruptHandler = (notebook) => {
+      this.interruptNotebook(notebook.uri.toString());
+    };
+
+    const selectionDisposable = controller.onDidChangeSelectedNotebooks((event) => {
+      if (!event.selected) return;
+      const selectedDescriptor = this.controllers.get(controller.id)?.descriptor ?? descriptor;
+      if (isActionDescriptor(selectedDescriptor)) {
+        void this.handleActionSelection(event.notebook, selectedDescriptor);
+        return;
+      }
+      void this.handleControllerSelection(event.notebook, selectedDescriptor, controller.id);
+    });
+
+    const entry = { controller, descriptor, selectionDisposable };
+    this.controllers.set(controllerId, entry);
+    return entry;
+  }
+
+  private ensureManualPathController(): PyControllerEntry {
+    const descriptor: PyKernelActionDescriptor = {
+      id: 'action:manual',
+      label: 'Python executable path...',
+      description: 'Manual path',
+      detail: 'Enter the full path to a python3 executable',
+      action: 'manual',
+    };
+    const controllerId = this.controllerIdForDescriptor(descriptor);
+    const existing = this.controllers.get(controllerId);
+    if (existing) {
+      existing.descriptor = descriptor;
+      existing.controller.label = descriptor.label;
+      existing.controller.description = descriptor.description;
+      existing.controller.detail = descriptor.detail;
+      return existing;
+    }
+
+    const controller = vscode.notebooks.createNotebookController(
+      controllerId,
+      PY_NOTEBOOK_TYPE,
+      descriptor.label,
+    );
+    controller.supportedLanguages = ['python'];
+    controller.supportsExecutionOrder = true;
+    controller.description = descriptor.description;
+    controller.detail = descriptor.detail;
+    controller.executeHandler = async () => undefined;
+
+    const selectionDisposable = controller.onDidChangeSelectedNotebooks((event) => {
+      if (!event.selected) return;
+      const selectedDescriptor = this.controllers.get(controller.id)?.descriptor ?? descriptor;
+      if (!isActionDescriptor(selectedDescriptor)) return;
+      void this.handleActionSelection(event.notebook, selectedDescriptor);
+    });
+
+    const entry = { controller, descriptor, selectionDisposable };
+    this.controllers.set(controllerId, entry);
+    return entry;
   }
 
   private resolveDefaultDescriptor(): PythonKernelDescriptor | undefined {
@@ -497,7 +670,10 @@ export class PyNotebookController implements vscode.Disposable {
       ?? this.availableDescriptors()[0];
   }
 
-  private controllerIdForDescriptor(descriptor: PythonKernelDescriptor): string {
+  private controllerIdForDescriptor(descriptor: PyControllerDescriptor): string {
+    if (isActionDescriptor(descriptor)) {
+      return 'r-notebook-py-kernel-action:manual-path';
+    }
     return `r-notebook-py-kernel:${descriptor.id}`;
   }
 
@@ -517,28 +693,56 @@ export class PyNotebookController implements vscode.Disposable {
     if (notebook.notebookType !== PY_NOTEBOOK_TYPE) return;
     const preferred = this.resolveDescriptorForNotebook(notebook);
     for (const entry of this.controllers.values()) {
-      entry.controller.updateNotebookAffinity(
-        notebook,
-        entry.descriptor.id === preferred.id
-          ? vscode.NotebookControllerAffinity.Preferred
-          : vscode.NotebookControllerAffinity.Default,
-      );
+      try {
+        entry.controller.updateNotebookAffinity(
+          notebook,
+          entry.descriptor.id === preferred.id
+            ? vscode.NotebookControllerAffinity.Preferred
+            : vscode.NotebookControllerAffinity.Default,
+        );
+      } catch {
+        // Cursor can expose affinity APIs while still rejecting extension
+        // access on stable builds. Affinity is only a picker hint, so skip it.
+      }
     }
   }
 
   private resolveDescriptorForNotebook(notebook: vscode.NotebookDocument): PythonKernelDescriptor {
     const meta = (notebook.metadata ?? {}) as NotebookPythonMetadata;
+    const remembered = this.rememberedNotebookSelections.get(notebook.uri.toString());
     const kernelMeta = getNotebookKernelMetadata(meta);
     const descriptors = this.availableDescriptors();
 
-    return descriptors.find((descriptor) =>
-      this.controllerIdForDescriptor(descriptor) === kernelMeta?.controllerId
+    const matched = descriptors.find((descriptor) =>
+      this.controllerIdForDescriptor(descriptor) === remembered?.controllerId
+      || descriptor.kernelspecName === remembered?.kernelspecName
+      || descriptor.pythonPath === remembered?.pythonPath
+      || descriptor.displayName === remembered?.displayName
+      || this.controllerIdForDescriptor(descriptor) === kernelMeta?.controllerId
       || descriptor.kernelspecName === kernelMeta?.kernelspecName
       || descriptor.kernelspecName === meta.kernelspec?.name
       || descriptor.pythonPath === kernelMeta?.pythonPath
       || descriptor.displayName === kernelMeta?.displayName
       || descriptor.displayName === meta.kernelspec?.display_name,
-    ) ?? this.resolveDefaultDescriptor()
+    );
+    if (matched) return matched;
+
+    if (remembered?.pythonPath) {
+      const rememberedDescriptor = this.manualDescriptor(remembered.pythonPath, {
+        displayName: remembered.displayName,
+        kernelspecName: remembered.kernelspecName,
+      });
+      const ensuredDescriptor = this.ensureControllerForDescriptor(rememberedDescriptor).descriptor;
+      if (!isActionDescriptor(ensuredDescriptor)) return ensuredDescriptor;
+    }
+
+    const persistedDescriptor = this.descriptorFromNotebookMetadata(notebook);
+    if (persistedDescriptor) {
+      const ensuredDescriptor = this.ensureControllerForDescriptor(persistedDescriptor).descriptor;
+      if (!isActionDescriptor(ensuredDescriptor)) return ensuredDescriptor;
+    }
+
+    return this.resolveDefaultDescriptor()
       ?? this.manualDescriptor(this.pyBinPath());
   }
 
@@ -548,7 +752,7 @@ export class PyNotebookController implements vscode.Disposable {
     controllerId: string,
   ): Promise<void> {
     if (notebook.notebookType !== PY_NOTEBOOK_TYPE) return;
-    await this.persistSelection(notebook, descriptor, controllerId);
+    await this.rememberNotebookSelection(notebook.uri.toString(), descriptor, controllerId);
     const session = getPySession(notebook.uri.toString());
     if (session) {
       session.setKernel(descriptor.pythonPath, descriptor.env);
@@ -558,20 +762,58 @@ export class PyNotebookController implements vscode.Disposable {
     this.syncNotebookAffinities(notebook);
   }
 
+  private async handleActionSelection(
+    notebook: vscode.NotebookDocument,
+    descriptor: PyKernelActionDescriptor,
+  ): Promise<void> {
+    if (notebook.notebookType !== PY_NOTEBOOK_TYPE) return;
+
+    const currentDescriptor = this.resolveDescriptorForNotebook(notebook);
+    const pythonPath = await vscode.window.showInputBox({
+      title: 'Python Kernel Path',
+      prompt: 'Full path to python3 (for example /usr/local/bin/python3)',
+      value: currentDescriptor.pythonPath,
+    });
+
+    if (!pythonPath) {
+      await this.selectDescriptorForNotebook(notebook, currentDescriptor);
+      return;
+    }
+
+    const pickedDescriptor = this.manualDescriptor(pythonPath);
+    await this.selectDescriptorForNotebook(notebook, pickedDescriptor);
+    vscode.window.showInformationMessage(`Python kernel set to ${pickedDescriptor.displayName}.`);
+  }
+
   private async selectDescriptorForNotebook(
     notebook: vscode.NotebookDocument,
     descriptor: PythonKernelDescriptor,
   ): Promise<void> {
-    const controllerId = this.controllerIdForDescriptor(descriptor);
-    await this.persistSelection(notebook, descriptor, controllerId);
+    const ensuredDescriptor = this.ensureControllerForDescriptor(descriptor).descriptor;
+    if (isActionDescriptor(ensuredDescriptor)) return;
+    const controllerId = this.controllerIdForDescriptor(ensuredDescriptor);
+    await this.rememberNotebookSelection(notebook.uri.toString(), ensuredDescriptor, controllerId);
 
     const didSelect = await this.selectNotebookController(notebook, controllerId);
     if (!didSelect) {
-      await this.handleControllerSelection(notebook, descriptor, controllerId);
+      await this.handleControllerSelection(notebook, ensuredDescriptor, controllerId);
       return;
     }
 
     this.syncNotebookAffinities(notebook);
+  }
+
+  private descriptorFromNotebookMetadata(
+    notebook: vscode.NotebookDocument,
+  ): PythonKernelDescriptor | undefined {
+    const meta = (notebook.metadata ?? {}) as NotebookPythonMetadata;
+    const kernelMeta = getNotebookKernelMetadata(meta);
+    if (!kernelMeta?.pythonPath) return undefined;
+
+    return this.manualDescriptor(kernelMeta.pythonPath, {
+      displayName: kernelMeta.displayName ?? meta.kernelspec?.display_name,
+      kernelspecName: kernelMeta.kernelspecName ?? meta.kernelspec?.name,
+    });
   }
 
   private async selectNotebookController(
@@ -613,40 +855,6 @@ export class PyNotebookController implements vscode.Disposable {
     }
   }
 
-  private async persistSelection(
-    notebook: vscode.NotebookDocument,
-    descriptor: PythonKernelDescriptor,
-    controllerId = this.controllerIdForDescriptor(descriptor),
-  ): Promise<void> {
-    const meta = (notebook.metadata ?? {}) as NotebookPythonMetadata;
-    const nextMeta: NotebookPythonMetadata = {
-      ...meta,
-      kernelspec: {
-        ...(meta.kernelspec ?? {}),
-        display_name: descriptor.displayName,
-        language: 'python',
-        name: descriptor.kernelspecName,
-      },
-      language_info: {
-        ...(meta.language_info ?? {}),
-        name: 'python',
-      },
-      rNotebook: {
-        ...(getNotebookKernelMetadata(meta) ?? {}),
-        controllerId,
-        kernelspecName: descriptor.kernelspecName,
-        displayName: descriptor.displayName,
-        pythonPath: descriptor.pythonPath,
-      },
-    };
-
-    if (metadataMatches(meta, nextMeta)) return;
-
-    const edit = new vscode.WorkspaceEdit();
-    edit.set(notebook.uri, [vscode.NotebookEdit.updateNotebookMetadata(nextMeta)]);
-    await vscode.workspace.applyEdit(edit);
-  }
-
   private liveKey(docUri: string, chunkId: string): string {
     return `${docUri}::${chunkId}`;
   }
@@ -660,22 +868,65 @@ export class PyNotebookController implements vscode.Disposable {
     const items = notebookOutputItemsFromExecResult(result, chunkId, options);
     if (!items) {
       state.output = null;
-      await state.execution.clearOutput();
+      await this.withOutputTimeout(
+        state.execution.clearOutput(),
+        'clearOutput',
+      ).catch(() => undefined);
       return;
     }
     if (!state.output) {
-      state.output = new vscode.NotebookCellOutput(items, {
-        chunkId,
-        running: Boolean(options?.running),
-      });
-      await state.execution.replaceOutput([state.output]);
+      await this.replaceExecutionOutputFromScratch(state, items, chunkId, options);
       return;
     }
     state.output.metadata = {
       chunkId,
       running: Boolean(options?.running),
     };
-    await state.execution.replaceOutputItems(items, state.output);
+    try {
+      await this.withOutputTimeout(
+        state.execution.replaceOutputItems(items, state.output),
+        'replaceOutputItems',
+      );
+    } catch {
+      await this.replaceExecutionOutputFromScratch(state, items, chunkId, options);
+    }
+  }
+
+  private async replaceExecutionOutputFromScratch(
+    state: LiveExecutionState,
+    items: vscode.NotebookCellOutputItem[],
+    chunkId: string,
+    options?: { running?: boolean },
+  ): Promise<void> {
+    state.output = new vscode.NotebookCellOutput(items, {
+      chunkId,
+      running: Boolean(options?.running),
+    });
+    await this.withOutputTimeout(
+      state.execution.replaceOutput([state.output]),
+      'replaceOutput',
+    ).catch(() => {
+      state.output = null;
+    });
+  }
+
+  private withOutputTimeout<T>(promise: Thenable<T>, label: string): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error(`Notebook ${label} timed out`)),
+        OUTPUT_UPDATE_TIMEOUT_MS,
+      );
+      Promise.resolve(promise).then(
+        (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      );
+    });
   }
 
   dispose(): void {
@@ -688,14 +939,6 @@ export class PyNotebookController implements vscode.Disposable {
       entry.selectionDisposable.dispose();
       entry.controller.dispose();
     }
-  }
-
-  private async refreshVariableCache(
-    session: ReturnType<typeof getOrCreatePySession>,
-  ): Promise<void> {
-    try {
-      await session.vars();
-    } catch {}
   }
 }
 
@@ -717,6 +960,12 @@ function emptyExecResult(chunkId: string, sourceCode = ''): ExecResult {
     output_order: [],
     error: null,
   };
+}
+
+function simplePythonLabel(pythonPath: string): string {
+  const parts = pythonPath.split(/[\\/]/).filter(Boolean);
+  const base = parts[parts.length - 1] ?? pythonPath;
+  return base === pythonPath ? `Python (${pythonPath})` : `Python (${base})`;
 }
 
 function mergeConsoleResult(result: ExecResult, liveResult: ExecResult): ExecResult {
@@ -755,18 +1004,19 @@ function buildDefaultOutputOrder(result: ExecResult): ExecResult['output_order']
   return order;
 }
 
-function metadataMatches(current: NotebookPythonMetadata, next: NotebookPythonMetadata): boolean {
-  const currentKernelMeta = getNotebookKernelMetadata(current);
-  const nextKernelMeta = getNotebookKernelMetadata(next);
-  return (
-    current.kernelspec?.name === next.kernelspec?.name &&
-    current.kernelspec?.display_name === next.kernelspec?.display_name &&
-    current.language_info?.name === next.language_info?.name &&
-    currentKernelMeta?.controllerId === nextKernelMeta?.controllerId &&
-    currentKernelMeta?.displayName === nextKernelMeta?.displayName &&
-    currentKernelMeta?.kernelspecName === nextKernelMeta?.kernelspecName &&
-    currentKernelMeta?.pythonPath === nextKernelMeta?.pythonPath
-  );
+function parseRememberedSelection(value: unknown): RememberedPyNotebookKernel | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const source = value as Record<string, unknown>;
+  if (typeof source.pythonPath !== 'string' || source.pythonPath.length === 0) return undefined;
+  if (typeof source.controllerId !== 'string' || source.controllerId.length === 0) return undefined;
+  return {
+    pythonPath: source.pythonPath,
+    controllerId: source.controllerId,
+    kernelspecName: typeof source.kernelspecName === 'string' ? source.kernelspecName : undefined,
+    displayName: typeof source.displayName === 'string' && source.displayName.length > 0
+      ? source.displayName
+      : source.pythonPath,
+  };
 }
 
 

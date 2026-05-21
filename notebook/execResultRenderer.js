@@ -1,11 +1,14 @@
 const STYLE_ID = 'r-notebook-output-renderer-style';
 const TAB_STATE_PREFIX = 'rNotebook.tab.';
 const PAGE_STATE_PREFIX = 'rNotebook.page.';
+const ROW_STATE_PREFIX = 'rNotebook.row.';
 const CONSOLE_STATE_PREFIX = 'rNotebook.console.';
 const globalTabState = globalThis.__rNotebookTabState || (globalThis.__rNotebookTabState = new Map());
 const globalPageState = globalThis.__rNotebookPageState || (globalThis.__rNotebookPageState = new Map());
+const globalRowState = globalThis.__rNotebookRowState || (globalThis.__rNotebookRowState = new Map());
 const globalConsoleState = globalThis.__rNotebookConsoleState || (globalThis.__rNotebookConsoleState = new Map());
 const globalConsoleText = globalThis.__rNotebookConsoleText || (globalThis.__rNotebookConsoleText = new Map());
+const globalErrorText = globalThis.__rNotebookErrorText || (globalThis.__rNotebookErrorText = new Map());
 
 const STYLES = `
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -57,26 +60,45 @@ html, body { border: none; outline: none; }
   color: var(--vscode-descriptionForeground);
   font-size: 11px;
 }
-.console-open-tab-btn {
-  background: var(--vscode-button-background, #0078d4);
-  border: 1px solid var(--vscode-button-background, #0078d4);
-  color: var(--vscode-button-foreground, #fff);
+.console-title-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+.console-open-tab-btn,
+.console-copy-btn {
+  background: var(--vscode-input-background, #f3f3f3);
+  border: 1px solid var(--vscode-input-border, #c8c8c8);
+  color: var(--vscode-input-foreground, #222);
   padding: 2px 8px;
   font-size: 11px;
   cursor: pointer;
   border-radius: 2px;
-  margin-left: auto;
+  box-shadow: none;
 }
 .console-open-tab-btn:hover,
-.console-open-tab-btn:focus,
-.console-open-tab-btn:active {
-  background: var(--vscode-button-background, #0078d4);
-  border-color: var(--vscode-button-background, #0078d4);
-  color: var(--vscode-button-foreground, #fff);
+.console-open-tab-btn:active,
+.console-copy-btn:hover,
+.console-copy-btn:active {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, .16));
+  border-color: var(--vscode-input-border, #c8c8c8);
+  color: var(--vscode-input-foreground, #222);
+  box-shadow: none;
 }
-.console-open-tab-btn:focus {
-  outline: 1px solid var(--vscode-focusBorder, #0078d4);
-  outline-offset: 1px;
+.console-open-tab-btn:focus,
+.console-copy-btn:focus,
+.console-open-tab-btn:focus-visible,
+.console-copy-btn:focus-visible {
+  border-color: var(--vscode-input-border, #c8c8c8);
+  outline: none;
+  box-shadow: none;
+}
+.console-open-tab-btn:disabled,
+.console-copy-btn:disabled {
+  opacity: .85;
+  border-color: var(--vscode-input-border, #c8c8c8);
+  box-shadow: none;
 }
 .console-scroll {
   max-height: 40em;
@@ -120,6 +142,98 @@ html, body { border: none; outline: none; }
   font-size: 12px;
   white-space: pre-wrap;
   margin-bottom: 6px;
+}
+.error-viewer {
+  border: 1px solid var(--vscode-inputValidation-errorBorder, rgba(224, 108, 117, .55));
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 10px;
+  background: var(--vscode-editor-background, #fff);
+  color: var(--vscode-editor-foreground, #111);
+}
+.error-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 10px;
+  background: var(--vscode-inputValidation-errorBackground, rgba(224, 108, 117, .12));
+  border-bottom: 1px solid var(--vscode-inputValidation-errorBorder, rgba(224, 108, 117, .35));
+  color: var(--vscode-errorForeground, #c62828);
+  font-size: 12px;
+}
+.error-body {
+  padding: 10px 12px;
+  background: var(--vscode-editor-background, #fff);
+  color: var(--vscode-editor-foreground, #111);
+  max-height: 40em;
+  overflow: auto;
+}
+.error-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.error-mark {
+  flex: 0 0 18px;
+  color: var(--vscode-errorForeground, #c62828);
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1;
+  text-align: center;
+}
+.error-message,
+.error-detail,
+.error-frame-code {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--vscode-editor-foreground, #111);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+}
+.error-detail-wrap {
+  margin: 6px 0 10px 20px;
+}
+.error-detail-wrap summary {
+  color: var(--vscode-editor-foreground, #111);
+  cursor: pointer;
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+.error-trace-title {
+  color: var(--vscode-editor-foreground, #111);
+  font-size: 12px;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+.error-trace {
+  margin-top: 10px;
+}
+.error-trace-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.error-frame {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  gap: 8px;
+  padding: 5px 8px;
+  border-left: 2px solid rgba(255, 120, 120, .35);
+  background: var(--vscode-editor-background, #fff);
+}
+.error-frame-no {
+  color: var(--vscode-errorForeground, #c62828);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
+  font-weight: 700;
+  text-align: right;
+  user-select: none;
 }
 .output-html {
   width: 100%;
@@ -184,6 +298,37 @@ html, body { border: none; outline: none; }
 }
 .df-table-wrap { overflow-x: auto; max-height: 300px; overflow-y: auto; }
 .df-table { width: 100%; border-collapse: collapse; white-space: nowrap; }
+.df-table tbody tr { cursor: pointer; }
+.df-table tbody tr:hover td {
+  background: var(--vscode-list-hoverBackground, rgba(128, 128, 128, .10));
+}
+.df-table tbody tr.df-row-selected td {
+  --df-selected-border: var(--vscode-focusBorder, #0078d4);
+  background: var(--vscode-list-activeSelectionBackground, rgba(0, 120, 212, .18));
+  color: var(--vscode-list-activeSelectionForeground, var(--vscode-editor-foreground));
+  box-shadow:
+    inset 0 2px 0 var(--df-selected-border),
+    inset 0 -2px 0 var(--df-selected-border);
+}
+.df-table tbody tr.df-row-selected td:first-child {
+  box-shadow:
+    inset 0 2px 0 var(--df-selected-border),
+    inset 0 -2px 0 var(--df-selected-border),
+    inset 2px 0 0 var(--df-selected-border);
+}
+.df-table tbody tr.df-row-selected td:last-child {
+  box-shadow:
+    inset 0 2px 0 var(--df-selected-border),
+    inset 0 -2px 0 var(--df-selected-border),
+    inset -2px 0 0 var(--df-selected-border);
+}
+.df-table tbody tr.df-row-selected td:first-child:last-child {
+  box-shadow:
+    inset 0 2px 0 var(--df-selected-border),
+    inset 0 -2px 0 var(--df-selected-border),
+    inset 2px 0 0 var(--df-selected-border),
+    inset -2px 0 0 var(--df-selected-border);
+}
 .df-table thead th {
   position: sticky;
   top: 0;
@@ -194,8 +339,27 @@ html, body { border: none; outline: none; }
   padding: 4px 10px;
   text-align: left;
   font-weight: 600;
+  vertical-align: bottom;
 }
 .df-table thead th:last-child { border-right: none; }
+.df-col-head {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+.df-col-name {
+  display: block;
+  line-height: 1.25;
+}
+.df-col-type {
+  display: block;
+  margin-top: 2px;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.2;
+  color: var(--vscode-descriptionForeground);
+}
 .df-table td {
   padding: 3px 10px;
   border-bottom: 1px solid var(--vscode-editorGroup-border);
@@ -356,24 +520,31 @@ html, body { border: none; outline: none; }
 
 let _rendererCtx = null;
 
-function openConsoleInTab(element, chunkId) {
-  const content = globalConsoleText.get(chunkId) || '';
+function openOutputInTab(content, chunkId, title) {
   if (_rendererCtx && typeof _rendererCtx.postMessage === 'function') {
-    _rendererCtx.postMessage({ type: 'open_console_in_tab', content, chunkId })
+    _rendererCtx.postMessage({ type: 'open_output_in_tab', content, chunkId, title })
       .then((delivered) => {
         if (!delivered) {
-          fallbackOpenConsoleInTab(content, chunkId);
+          fallbackOpenOutputInTab(content, chunkId);
         }
       })
       .catch(() => {
-        fallbackOpenConsoleInTab(content, chunkId);
+        fallbackOpenOutputInTab(content, chunkId);
       });
     return;
   }
-  fallbackOpenConsoleInTab(content, chunkId);
+  fallbackOpenOutputInTab(content, chunkId);
 }
 
-function fallbackOpenConsoleInTab(content, chunkId) {
+function openConsoleInTab(element, chunkId) {
+  openOutputInTab(globalConsoleText.get(chunkId) || '', chunkId, `Console: ${chunkId || 'console'}`);
+}
+
+function openErrorInTab(element, chunkId) {
+  openOutputInTab(globalErrorText.get(chunkId) || '', chunkId, `Error: ${chunkId || 'chunk'}`);
+}
+
+function fallbackOpenOutputInTab(content, chunkId) {
   if (typeof document === 'undefined') {
     return;
   }
@@ -383,9 +554,74 @@ function fallbackOpenConsoleInTab(content, chunkId) {
   anchor.href = url;
   anchor.target = '_blank';
   anchor.rel = 'noopener noreferrer';
-  anchor.download = `${chunkId || 'console'}.txt`;
+  anchor.download = `${chunkId || 'output'}.txt`;
   anchor.click();
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
+function copyConsoleText(element, chunkId, button) {
+  const content = globalConsoleText.get(chunkId) || '';
+  copyText(content, chunkId, button);
+}
+
+function copyErrorText(element, chunkId, button) {
+  const content = globalErrorText.get(chunkId) || '';
+  copyText(content, chunkId, button);
+}
+
+function copyText(content, chunkId, button) {
+  if (_rendererCtx && typeof _rendererCtx.postMessage === 'function') {
+    _rendererCtx.postMessage({ type: 'copy_console', content, chunkId })
+      .then((delivered) => {
+        if (delivered) {
+          flashCopyButton(button);
+          return;
+        }
+        fallbackCopyConsoleText(content, button);
+      })
+      .catch(() => fallbackCopyConsoleText(content, button));
+    return;
+  }
+  fallbackCopyConsoleText(content, button);
+}
+
+function fallbackCopyConsoleText(content, button) {
+  const copyPromise = typeof navigator !== 'undefined' && navigator.clipboard?.writeText
+    ? navigator.clipboard.writeText(content)
+    : legacyCopyText(content);
+  Promise.resolve(copyPromise)
+    .then(() => flashCopyButton(button))
+    .catch(() => flashCopyButton(button, 'Failed'));
+}
+
+function legacyCopyText(content) {
+  return new Promise((resolve, reject) => {
+    try {
+      const textarea = document.createElement('textarea');
+      textarea.value = content;
+      textarea.setAttribute('readonly', '');
+      textarea.style.position = 'fixed';
+      textarea.style.left = '-9999px';
+      document.body.appendChild(textarea);
+      textarea.select();
+      const ok = document.execCommand('copy');
+      textarea.remove();
+      ok ? resolve() : reject(new Error('copy failed'));
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+function flashCopyButton(button, label = 'Copied') {
+  if (!button) return;
+  const original = button.textContent || 'Copy';
+  button.textContent = label;
+  button.disabled = true;
+  setTimeout(() => {
+    button.textContent = original;
+    button.disabled = false;
+  }, 1200);
 }
 
 export function activate(ctx) {
@@ -422,10 +658,16 @@ function renderExecResult(outputItem, element, result) {
   captureConsoleState(element, chunkId);
   const tabs = buildTabs(result, running);
 
-  // Store console output for the "Open in Tab" feature
-  const consoleText = buildConsoleText(result);
-  if (consoleText.trim()) {
-    globalConsoleText.set(chunkId, consoleText);
+  // Store the full console transcript for copy/open-tab actions.
+  const consoleClipboardText = buildConsoleClipboardText(result);
+  if (consoleClipboardText.trim()) {
+    globalConsoleText.set(chunkId, consoleClipboardText);
+  }
+  const errorText = buildErrorText(result);
+  if (errorText.trim()) {
+    globalErrorText.set(chunkId, errorText);
+  } else {
+    globalErrorText.delete(chunkId);
   }
 
   if (tabs.length === 0) {
@@ -443,6 +685,7 @@ function renderExecResult(outputItem, element, result) {
 
   bindTabInteractions(element, chunkId);
   bindConsoleInteractions(element, chunkId);
+  bindErrorInteractions(element, chunkId);
   hydrateDataFrames(element, chunkId, renderState.dfById);
   setActiveTab(element, chunkId, activeKey, { forceConsoleBottom: false });
 }
@@ -454,8 +697,9 @@ function buildTabs(result, running) {
   const sourceCode = normalizeSourceCode(result.source_code);
   const mediaTabs = collectMediaTabs(result);
   const hasOtherContent = mediaTabs.length > 0 || Boolean(result.error);
+  const hasConsoleSurface = Boolean(sourceCode || consoleSegments.length > 0 || consoleText.trim());
 
-  if (running || hasOtherContent || consoleText.trim()) {
+  if (running || hasOtherContent || hasConsoleSurface) {
     tabs.push({
       key: 'console',
       type: 'console',
@@ -473,7 +717,7 @@ function buildTabs(result, running) {
     tabs.push({
       key: 'error',
       type: 'error',
-      content: result.error,
+      content: buildErrorText(result),
     });
   }
 
@@ -634,7 +878,7 @@ function renderPanelHtml(tab, renderState) {
     case 'text':
       return `<pre class="output-text">${esc(tab.content)}</pre>`;
     case 'error':
-      return `<pre class="output-error">x ${esc(tab.content)}</pre>`;
+      return buildErrorViewerHtml(tab.content);
     default:
       return '';
   }
@@ -655,10 +899,52 @@ function buildConsoleViewerHtml(content, options = {}) {
     <div class="console-title">
       <strong>Console</strong>
       ${status}
-      <button class="console-open-tab-btn" title="Open console output in a new tab">Open in Tab</button>
+      <span class="console-title-actions">
+        <button class="console-copy-btn" title="Copy all console output">Copy</button>
+        <button class="console-open-tab-btn" title="Open console output in a new tab">Open in Tab</button>
+      </span>
     </div>
     <div class="console-scroll${liveClass}">
       <div class="console-body">${transcriptHtml}</div>
+    </div>
+  </div>`;
+}
+
+function buildErrorViewerHtml(content) {
+  const parsed = parseErrorText(content);
+  const detailsHtml = parsed.details.length > 0
+    ? `<details class="error-detail-wrap" open>
+        <summary>Details</summary>
+        <pre class="error-detail">${esc(parsed.details.join('\n'))}</pre>
+      </details>`
+    : '';
+  const traceHtml = parsed.frames.length > 0
+    ? `<div class="error-trace">
+        <div class="error-trace-title">Traceback</div>
+        <ol class="error-trace-list">
+          ${parsed.frames.map((frame) => `<li class="error-frame">
+            <span class="error-frame-no">${esc(frame.index)}</span>
+            <pre class="error-frame-code">${esc(frame.code)}</pre>
+          </li>`).join('')}
+        </ol>
+      </div>`
+    : '';
+  const fallbackHtml = !parsed.summary && !detailsHtml && !traceHtml
+    ? `<pre class="error-message">${esc(content)}</pre>`
+    : '';
+  return `<div class="error-viewer">
+    <div class="error-title">
+      <strong>Error</strong>
+      <span class="console-title-actions">
+        <button class="error-copy-btn console-copy-btn" title="Copy full error output">Copy</button>
+        <button class="error-open-tab-btn console-open-tab-btn" title="Open error output in a new tab">Open in Tab</button>
+      </span>
+    </div>
+    <div class="error-body">
+      ${parsed.summary ? `<div class="error-summary"><span class="error-mark">x</span><pre class="error-message">${esc(parsed.summary)}</pre></div>` : ''}
+      ${detailsHtml}
+      ${traceHtml}
+      ${fallbackHtml}
     </div>
   </div>`;
 }
@@ -703,19 +989,90 @@ function bindTabInteractions(element, chunkId) {
   });
 }
 
+function clearActionButtonFocus(container) {
+  const doc = container && container.ownerDocument;
+  if (!doc) {
+    return;
+  }
+  container.querySelectorAll('.console-open-tab-btn, .console-copy-btn').forEach((button) => {
+    if (typeof button.blur === 'function') {
+      button.blur();
+    }
+  });
+  const active = doc.activeElement;
+  if (
+    active
+    && typeof active.matches === 'function'
+    && active.matches('.console-open-tab-btn, .console-copy-btn')
+    && typeof active.blur === 'function'
+  ) {
+    active.blur();
+  }
+}
+
+function isActionButtonTarget(target) {
+  return Boolean(
+    target
+    && typeof target.closest === 'function'
+    && target.closest('.console-open-tab-btn, .console-copy-btn')
+  );
+}
+
+function blurActionButton(button) {
+  if (!button || typeof button.blur !== 'function') {
+    return;
+  }
+  button.blur();
+  if (typeof requestAnimationFrame === 'function') {
+    requestAnimationFrame(() => button.blur());
+  } else {
+    setTimeout(() => button.blur(), 0);
+  }
+}
+
+function bindActionButtonMouseBehavior(button) {
+  if (!button) {
+    return;
+  }
+  button.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+  });
+  button.addEventListener('pointerup', () => {
+    blurActionButton(button);
+  });
+}
+
 function bindConsoleInteractions(element, chunkId) {
   element.querySelectorAll('.console-title').forEach((title) => {
-    title.addEventListener('click', (e) => {
-      if (e.target.classList.contains('console-open-tab-btn')) {
+    title.addEventListener('pointerdown', (e) => {
+      if (isActionButtonTarget(e.target)) {
         return;
       }
+      clearActionButtonFocus(element);
+    });
+
+    title.addEventListener('click', (e) => {
+      if (isActionButtonTarget(e.target)) {
+        return;
+      }
+      clearActionButtonFocus(element);
       resetConsoleHeight(element, chunkId, { followBottom: true });
     });
 
     const btn = title.querySelector('.console-open-tab-btn');
     if (btn) {
+      bindActionButtonMouseBehavior(btn);
       btn.addEventListener('click', () => {
         openConsoleInTab(element, chunkId);
+        blurActionButton(btn);
+      });
+    }
+    const copyBtn = title.querySelector('.console-copy-btn');
+    if (copyBtn) {
+      bindActionButtonMouseBehavior(copyBtn);
+      copyBtn.addEventListener('click', () => {
+        copyConsoleText(element, chunkId, copyBtn);
+        blurActionButton(copyBtn);
       });
     }
   });
@@ -839,6 +1196,41 @@ function bindConsoleInteractions(element, chunkId) {
         });
       });
     });
+  });
+}
+
+function bindErrorInteractions(element, chunkId) {
+  element.querySelectorAll('.error-title').forEach((title) => {
+    title.addEventListener('pointerdown', (e) => {
+      if (isActionButtonTarget(e.target)) {
+        return;
+      }
+      clearActionButtonFocus(element);
+    });
+
+    title.addEventListener('click', (e) => {
+      if (isActionButtonTarget(e.target)) {
+        return;
+      }
+      clearActionButtonFocus(element);
+    });
+
+    const openBtn = title.querySelector('.error-open-tab-btn');
+    if (openBtn) {
+      bindActionButtonMouseBehavior(openBtn);
+      openBtn.addEventListener('click', () => {
+        openErrorInTab(element, chunkId);
+        blurActionButton(openBtn);
+      });
+    }
+    const copyBtn = title.querySelector('.error-copy-btn');
+    if (copyBtn) {
+      bindActionButtonMouseBehavior(copyBtn);
+      copyBtn.addEventListener('click', () => {
+        copyErrorText(element, chunkId, copyBtn);
+        blurActionButton(copyBtn);
+      });
+    }
   });
 }
 
@@ -1007,7 +1399,8 @@ function renderDataFrame(container, chunkId, tabKey, df) {
   const headerCells = (df.columns || []).map((column) => {
     const title = escAttr(column && column.type ? column.type : '');
     const name = esc(column && column.name ? column.name : '');
-    return `<th title="${title}">${name}</th>`;
+    const type = esc(column && column.type ? column.type : '?');
+    return `<th title="${title}"><div class="df-col-head"><span class="df-col-name">${name}</span><span class="df-col-type">(${type})</span></div></th>`;
   }).join('');
 
   container.innerHTML = `<div class="df-title">
@@ -1030,10 +1423,30 @@ function renderDataFrame(container, chunkId, tabKey, df) {
     ? clamp(storedPage, 0, Math.max(0, totalLoadedPages - 1))
     : 0;
 
-  const state = { chunkId, tabKey, df, page: initialPage };
+  const rowStateKey = `${ROW_STATE_PREFIX}${chunkId}:${tabKey}`;
+  const storedRowIndex = loadState(globalRowState, rowStateKey);
+  const selectedRowIndex = storedRowIndex === '' ? null : Number(storedRowIndex);
+  const state = {
+    chunkId,
+    tabKey,
+    df,
+    page: initialPage,
+    rowStateKey,
+    selectedRowIndex: Number.isFinite(selectedRowIndex) ? selectedRowIndex : null,
+  };
   container.addEventListener('click', (event) => {
     const eventTarget = event.target;
     if (!eventTarget || typeof eventTarget.closest !== 'function') {
+      return;
+    }
+    const row = eventTarget.closest('tbody tr[data-row-index]');
+    if (row && container.contains(row)) {
+      const rowIndex = Number(row.getAttribute('data-row-index'));
+      if (Number.isFinite(rowIndex)) {
+        state.selectedRowIndex = rowIndex;
+        storeState(globalRowState, state.rowStateKey, String(rowIndex));
+        applyDataFrameRowSelection(container, rowIndex);
+      }
       return;
     }
     const target = eventTarget.closest('[data-page]');
@@ -1093,6 +1506,7 @@ function drawDataFramePage(container, state) {
   const start = state.page * rowsPerPage;
   const slice = rows.slice(start, Math.min(start + rowsPerPage, rows.length));
   bodyEl.innerHTML = slice.map((row, rowIndex) => {
+    const absoluteRowIndex = start + rowIndex;
     const values = Array.isArray(row) ? row : Object.values(row || {});
     const rowName = rowNames[start + rowIndex] ?? String(start + rowIndex + 1);
     const cells = values.map((value) => {
@@ -1101,7 +1515,10 @@ function drawDataFramePage(container, state) {
       }
       return `<td>${esc(String(value))}</td>`;
     }).join('');
-    return `<tr><td class="row-idx">${esc(String(rowName))}</td>${cells}</tr>`;
+    const selectedAttrs = absoluteRowIndex === state.selectedRowIndex
+      ? ' class="df-row-selected" aria-selected="true"'
+      : ' aria-selected="false"';
+    return `<tr data-row-index="${absoluteRowIndex}" tabindex="0"${selectedAttrs}><td class="row-idx">${esc(String(rowName))}</td>${cells}</tr>`;
   }).join('');
 
   const rangeStart = start + 1;
@@ -1112,6 +1529,14 @@ function drawDataFramePage(container, state) {
   infoEl.textContent = `Rows ${formatCount(rangeStart)}-${formatCount(rangeEnd)} of ${formatCount(state.df.nrow)}${loadedSuffix}`;
   pagerEl.innerHTML = buildPagerHtml(state.page, totalPages);
   storeState(globalPageState, `${PAGE_STATE_PREFIX}${state.chunkId}:${state.tabKey}`, String(state.page));
+}
+
+function applyDataFrameRowSelection(container, selectedRowIndex) {
+  container.querySelectorAll('tbody tr[data-row-index]').forEach((row) => {
+    const isSelected = Number(row.getAttribute('data-row-index')) === selectedRowIndex;
+    row.classList.toggle('df-row-selected', isSelected);
+    row.setAttribute('aria-selected', isSelected ? 'true' : 'false');
+  });
 }
 
 function buildPagerHtml(currentPage, totalPages) {
@@ -1160,6 +1585,41 @@ function buildConsoleText(result) {
   return [result.stdout || '', result.stderr || '']
     .filter((part) => String(part).trim().length > 0)
     .join('\n');
+}
+
+function buildConsoleClipboardText(result) {
+  const fallbackOutput = normalizeConsoleText(buildConsoleText(result));
+  const consoleSegments = normalizeConsoleSegments(result.console_segments);
+  const sourceCode = normalizeSourceCode(result.source_code);
+
+  if (consoleSegments.length > 0) {
+    const parts = [];
+    const segmentOutputs = [];
+    consoleSegments.forEach((segment) => {
+      const code = normalizeSourceCode(segment.code);
+      const output = normalizeConsoleText(segment.output || '');
+      if (code) {
+        parts.push(formatSourceEcho(code));
+      }
+      if (output) {
+        parts.push(output);
+        segmentOutputs.push(output);
+      }
+    });
+    const transcriptOutput = segmentOutputs.join('\n');
+    if (fallbackOutput && fallbackOutput !== transcriptOutput) {
+      parts.push(fallbackOutput);
+    }
+    return parts.filter(Boolean).join('\n');
+  }
+
+  if (sourceCode) {
+    return [formatSourceEcho(sourceCode), fallbackOutput]
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  return fallbackOutput;
 }
 
 function previewConsoleText(text) {
@@ -1254,6 +1714,46 @@ function formatSourcePreview(sourceCode) {
     return '';
   }
   return formatSourceEcho(sourceCode).split('\n').slice(0, 4).join('\n');
+}
+
+function parseErrorText(text) {
+  const normalized = String(text || '').replace(/\r\n/g, '\n').trim();
+  const lines = normalized.split('\n');
+  const traceIndex = lines.findIndex((line) => /^traceback:\s*$/i.test(line.trim()));
+  const summaryLines = traceIndex >= 0 ? lines.slice(0, traceIndex) : lines;
+  const traceLines = traceIndex >= 0 ? lines.slice(traceIndex + 1) : [];
+  const nonEmptySummary = summaryLines.filter((line) => line.trim().length > 0);
+  const summary = nonEmptySummary.shift() || '';
+  const details = nonEmptySummary;
+  const frames = [];
+
+  for (const line of traceLines) {
+    const match = line.match(/^\s*(\d+):\s*(.*)$/);
+    if (match) {
+      frames.push({ index: match[1], code: match[2] || '' });
+      continue;
+    }
+    if (frames.length > 0) {
+      const last = frames[frames.length - 1];
+      last.code = `${last.code}${last.code ? '\n' : ''}${line}`;
+    } else if (line.trim()) {
+      details.push(line);
+    }
+  }
+
+  return { summary, details, frames };
+}
+
+function buildErrorText(result) {
+  const error = String(result.error || '').trim();
+  const trace = String(result.error_trace || '').trim();
+  if (!trace || trace === error) {
+    return error;
+  }
+  if (trace.startsWith(error)) {
+    return trace;
+  }
+  return `${error}\n\n${trace}`;
 }
 
 function normalizeConsoleText(text) {

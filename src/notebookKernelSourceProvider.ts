@@ -42,16 +42,22 @@ export function registerNotebookKernelSourceProviders(
   const notebooks = vscode.notebooks as ProposedNotebookApi;
   if (typeof notebooks.registerKernelSourceActionProvider !== 'function') return;
 
-  ctx.subscriptions.push(
-    notebooks.registerKernelSourceActionProvider(NOTEBOOK_TYPE, {
-      provideNotebookKernelSourceActions: () => [
-        availableKernelsAction(COMMAND_IDS.notebookSelectAvailableRKernels),
-      ],
-    }),
-    notebooks.registerKernelSourceActionProvider(PY_NOTEBOOK_TYPE, {
-      provideNotebookKernelSourceActions: () => [
-        availableKernelsAction(COMMAND_IDS.notebookSelectAvailablePythonKernels),
-      ],
-    }),
-  );
+  try {
+    ctx.subscriptions.push(
+      notebooks.registerKernelSourceActionProvider(NOTEBOOK_TYPE, {
+        provideNotebookKernelSourceActions: () => [
+          availableKernelsAction(COMMAND_IDS.notebookSelectAvailableRKernels),
+        ],
+      }),
+      notebooks.registerKernelSourceActionProvider(PY_NOTEBOOK_TYPE, {
+        provideNotebookKernelSourceActions: () => [
+          availableKernelsAction(COMMAND_IDS.notebookSelectAvailablePythonKernels),
+        ],
+      }),
+    );
+  } catch {
+    // Cursor can expose the proposed kernel-source hook while still rejecting
+    // extension usage on stable builds. Skipping this keeps notebook activation
+    // alive so the standard toolbar commands continue to work.
+  }
 }

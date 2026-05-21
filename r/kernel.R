@@ -45,6 +45,35 @@ send_message <- function(msg) {
   flush(REAL_CON_OUT)
 }
 
+format_call_text <- function(call) {
+  paste(deparse(call, width.cutoff = 120L), collapse = " ")
+}
+
+format_error_message <- function(e) {
+  call <- conditionCall(e)
+  if (!is.null(call)) {
+    return(paste0("Error in ", format_call_text(call), ": ", conditionMessage(e)))
+  }
+  paste0("Error: ", conditionMessage(e))
+}
+
+format_error_trace <- function(e, calls = sys.calls()) {
+  call_text <- vapply(calls, format_call_text, character(1))
+  call_text <- call_text[nzchar(call_text)]
+  internal <- grepl(
+    "^(capture_output|process_message|handle_message|tryCatch|tryCatchList|tryCatchOne|doTryCatch|withCallingHandlers|withVisible|eval|send_message|flush_streams|progress_cb|stream_cb|plot_cb|df_cb|h|\\.handleSimpleError)\\b",
+    call_text
+  )
+  user_calls <- call_text[!internal]
+  if (length(user_calls) == 0L) {
+    user_calls <- tail(call_text, 12L)
+  }
+  user_calls <- rev(user_calls)
+  header <- format_error_message(e)
+  frames <- sprintf("%d: %s", seq_along(user_calls), user_calls)
+  paste(c(header, "", "Traceback:", frames), collapse = "\n")
+}
+
 # Capture output from R code, evaluating each statement individually so that
 # visible results are auto-printed exactly as the R console would show them.
 capture_output <- function(expr_text, progress_cb = NULL, stream_cb = NULL,
@@ -66,12 +95,55 @@ capture_output <- function(expr_text, progress_cb = NULL, stream_cb = NULL,
   last_value   <- NULL
   last_visible <- FALSE
   error_val    <- NULL
+  error_trace_val <- NULL
   # inline_plots: list of raw base64 PNG strings, in encounter order.
   # inline_dfs_serialized: list of serialised data.frame results, in encounter order.
   # inline_order: list of {type, index, name} for natural interleaved ordering (0-indexed).
   inline_plots          <- list()
   inline_dfs_serialized <- list()
   inline_order          <- list()
+  capture_side_effect_plots <- requireNamespace("base64enc", quietly = TRUE)
+  capture_device_num <- NULL
+  capture_device_file <- NULL
+  last_capture_plot <- NULL
+
+  close_capture_device <- function() {
+    open_devices <- dev.list()
+    if (!is.null(capture_device_num) && !is.null(open_devices) && capture_device_num %in% unname(open_devices)) {
+      tryCatch(grDevices::dev.off(capture_device_num), error = function(e) NULL)
+    }
+    if (!is.null(capture_device_file) && file.exists(capture_device_file)) {
+      tryCatch(unlink(capture_device_file), error = function(e) NULL)
+    }
+    capture_device_num <<- NULL
+    capture_device_file <<- NULL
+    last_capture_plot <<- NULL
+    invisible(NULL)
+  }
+
+  ensure_capture_device <- function() {
+    if (!capture_side_effect_plots) return(FALSE)
+    open_devices <- dev.list()
+    if (!is.null(capture_device_num) && !is.null(open_devices) && capture_device_num %in% unname(open_devices)) {
+      return(dev.cur() == capture_device_num)
+    }
+    if (dev.cur() != 1L) return(FALSE)
+
+    capture_device_file <<- tempfile(fileext = ".png")
+    opened <- tryCatch({
+      png(capture_device_file, width = fig_w, height = fig_h, res = fig_dpi, units = "in")
+      TRUE
+    }, error = function(e) FALSE)
+    if (!opened) {
+      capture_device_file <<- NULL
+      return(FALSE)
+    }
+
+    capture_device_num <<- dev.cur()
+    tryCatch(dev.control("enable"), error = function(e) NULL)
+    last_capture_plot <<- tryCatch(recordPlot(), error = function(e) NULL)
+    TRUE
+  }
 
   append_console_segment_output <- function(text) {
     if (!nzchar(text) || length(console_segments) == 0L) return(invisible(NULL))
@@ -129,14 +201,20 @@ capture_output <- function(expr_text, progress_cb = NULL, stream_cb = NULL,
 
   if (!is.null(parse_err)) {
     error_val <- paste("Parse error:", parse_err)
+    error_trace_val <- error_val
   } else if (length(parsed) > 0) {
     for (i in seq_along(parsed)) {
       expr_code <- paste(deparse(parsed[[i]], width.cutoff = 500L), collapse = "\n")
+      if (code_mutates_workspace(expr_code)) {
+        mark_workspace_revision_changed()
+      }
+      cacheable_expr <- is_cacheable_plot_expression(expr_code)
       console_segments[[length(console_segments) + 1L]] <- list(code = expr_code, output = "")
       # Send progress before each statement (bypasses sink via file=stdout())
       if (!is.null(progress_cb)) {
         tryCatch(progress_cb(i, length(parsed), expr_code), error = function(e) NULL)
       }
+      capture_device_ready <- ensure_capture_device()
       vis <- tryCatch(
         withCallingHandlers(
           withVisible(eval(parsed[[i]], envir = .GlobalEnv)),
@@ -151,10 +229,13 @@ capture_output <- function(expr_text, progress_cb = NULL, stream_cb = NULL,
           warning = function(w) {
             emit_stderr_condition(conditionMessage(w))
             tryInvokeRestart("muffleWarning")
+          },
+          error = function(e) {
+            error_trace_val <<- format_error_trace(e, sys.calls())
           }
         ),
         error = function(e) list(
-          value   = structure(conditionMessage(e), class = "exec_error"),
+          value   = structure(format_error_message(e), class = "exec_error"),
           visible = FALSE
         )
       )
@@ -165,12 +246,37 @@ capture_output <- function(expr_text, progress_cb = NULL, stream_cb = NULL,
         flush_streams()
         break
       }
+      nm <- tryCatch(deparse(parsed[[i]]), error = function(e) paste0("expr", i))
+      if (capture_device_ready && !is.null(capture_device_num) && dev.cur() == capture_device_num) {
+        current_capture_plot <- tryCatch(recordPlot(), error = function(e) NULL)
+        if (
+          inherits(current_capture_plot, "recordedplot")
+          && length(current_capture_plot) > 0L
+          && !is.null(current_capture_plot[[1]])
+          && !identical(current_capture_plot, last_capture_plot)
+        ) {
+          b64 <- render_plot_to_b64(
+            current_capture_plot,
+            fig_w,
+            fig_h,
+            fig_dpi,
+            cache_label = nm,
+            allow_cache = cacheable_expr
+          )
+          if (!is.null(b64)) {
+            idx <- length(inline_plots)
+            inline_plots[[idx + 1L]] <- b64
+            inline_order <- c(inline_order, list(list(type = "plot", index = idx, name = nm)))
+            if (!is.null(plot_cb)) tryCatch(plot_cb(b64, idx, nm), error = function(e) NULL)
+          }
+        }
+        last_capture_plot <- current_capture_plot
+      }
       if (isTRUE(vis$visible)) {
-        nm <- tryCatch(deparse(parsed[[i]]), error = function(e) paste0("expr", i))
         if (is.data.frame(vis$value)) {
           # Serialize and stream immediately; record in inline_order.
           serialized <- tryCatch(
-            serialise_df(nm, vis$value, page_size = 2000),
+            serialise_df_inline(nm, vis$value, page_size = 2000, allow_cache = cacheable_expr),
             error = function(e) NULL
           )
           if (!is.null(serialized)) {
@@ -194,7 +300,14 @@ capture_output <- function(expr_text, progress_cb = NULL, stream_cb = NULL,
             print_display_aware_list(vis$value)
             for (item in visible_outputs$ordered) {
               if (item$kind == "plot") {
-                b64 <- render_plot_to_b64(item$value, fig_w, fig_h, fig_dpi)
+                b64 <- render_plot_to_b64(
+                  item$value,
+                  fig_w,
+                  fig_h,
+                  fig_dpi,
+                  cache_label = item$name,
+                  allow_cache = cacheable_expr
+                )
                 if (!is.null(b64)) {
                   idx <- length(inline_plots)  # 0-indexed
                   inline_plots[[idx + 1L]] <- b64
@@ -203,7 +316,7 @@ capture_output <- function(expr_text, progress_cb = NULL, stream_cb = NULL,
                 }
               } else if (item$kind == "df") {
                 serialized <- tryCatch(
-                  serialise_df(item$name, item$value, page_size = 2000),
+                  serialise_df_inline(item$name, item$value, page_size = 2000, allow_cache = cacheable_expr),
                   error = function(e) NULL
                 )
                 if (!is.null(serialized)) {
@@ -220,7 +333,14 @@ capture_output <- function(expr_text, progress_cb = NULL, stream_cb = NULL,
             print_display_aware_list(vis$value)
           }
         } else if (is_renderable_plot_object(vis$value)) {
-          b64 <- render_plot_to_b64(vis$value, fig_w, fig_h, fig_dpi)
+          b64 <- render_plot_to_b64(
+            vis$value,
+            fig_w,
+            fig_h,
+            fig_dpi,
+            cache_label = nm,
+            allow_cache = cacheable_expr
+          )
           if (is.null(b64)) {
             tryCatch(print(vis$value), error = function(e) NULL)
           } else {
@@ -247,6 +367,7 @@ capture_output <- function(expr_text, progress_cb = NULL, stream_cb = NULL,
   sink(type = "message")
   close(stdout_con)
   close(stderr_con)
+  close_capture_device()
 
   list(
     value                 = last_value,
@@ -256,6 +377,7 @@ capture_output <- function(expr_text, progress_cb = NULL, stream_cb = NULL,
     stdout                = paste(stdout_lines, collapse = "\n"),
     stderr                = paste(c(stderr_condition_lines, stderr_lines), collapse = "\n"),
     error                 = error_val,
+    error_trace           = error_trace_val,
     inline_plots          = inline_plots,
     inline_dfs_serialized = inline_dfs_serialized,
     inline_order          = inline_order
@@ -430,8 +552,13 @@ print_display_aware_list <- function(obj, indent = "", depth = 0L, max_depth = 4
   invisible(NULL)
 }
 
-render_plot_to_b64 <- function(value, fig_w = 7, fig_h = 5, fig_dpi = 120) {
+render_plot_to_b64 <- function(value, fig_w = 7, fig_h = 5, fig_dpi = 120,
+                               cache_label = NULL, allow_cache = FALSE) {
   if (!requireNamespace("base64enc", quietly = TRUE)) return(NULL)
+  if (allow_cache) {
+    cached <- cached_plot_render(cache_label, fig_w, fig_h, fig_dpi)
+    if (!is.null(cached)) return(cached)
+  }
   tmp <- tempfile(fileext = ".png")
   on.exit(unlink(tmp), add = TRUE)
   opened <- tryCatch({
@@ -448,7 +575,9 @@ render_plot_to_b64 <- function(value, fig_w = 7, fig_h = 5, fig_dpi = 120) {
     FALSE
   })
   if (!ok || !file.exists(tmp) || file.info(tmp)$size == 0) return(NULL)
-  base64enc::base64encode(tmp)
+  b64 <- base64enc::base64encode(tmp)
+  if (allow_cache) remember_plot_render(cache_label, fig_w, fig_h, fig_dpi, b64)
+  b64
 }
 
 render_visible_plot_object <- function(obj) {
@@ -542,7 +671,8 @@ snapshot_workspace_state <- function(checkpoint_path = NULL) {
 
   payload <- list(
     objects = user_objects,
-    attached_packages = sub("^package:", "", attached_packages)
+    attached_packages = sub("^package:", "", attached_packages),
+    kernel_state = snapshot_kernel_state()
   )
   if (!is.null(checkpoint_path) && nzchar(checkpoint_path)) {
     dir.create(dirname(checkpoint_path), recursive = TRUE, showWarnings = FALSE)
@@ -577,10 +707,12 @@ restore_workspace_state <- function(workspace_state = NULL, checkpoint_path = NU
 
   attached_packages <- character(0)
   objects <- restored
+  kernel_state <- NULL
 
   if (!is.null(names(restored)) && all(c("objects", "attached_packages") %in% names(restored))) {
     attached_packages <- restored[["attached_packages"]] %||% character(0)
     objects <- restored[["objects"]] %||% list()
+    kernel_state <- restored[["kernel_state"]] %||% NULL
   }
 
   if (!is.list(objects) || (length(objects) > 0 && is.null(names(objects)))) {
@@ -596,6 +728,7 @@ restore_workspace_state <- function(workspace_state = NULL, checkpoint_path = NU
   }
 
   if (length(objects) > 0) list2env(objects, envir = .GlobalEnv)
+  restore_kernel_state(kernel_state)
   invisible(NULL)
 }
 
@@ -619,6 +752,7 @@ process_message <- function(msg) {
     # Only remove variables that the USER created, not kernel internals.
     user_vars <- setdiff(ls(envir = .GlobalEnv), KERNEL_RESERVED)
     if (length(user_vars) > 0) rm(list = user_vars, envir = .GlobalEnv)
+    mark_workspace_revision_changed()
     # chunk_id is LOCAL here — safe even after rm().
     send_message(list(type = "result", chunk_id = chunk_id,
                       console = "",
@@ -667,7 +801,9 @@ process_message <- function(msg) {
                           message = paste("Workspace restore failed:", conditionMessage(e))))
       }
     )
-    if (restored_ok) send_message(list(type = "workspace_restored"))
+    if (restored_ok) {
+      send_message(list(type = "workspace_restored"))
+    }
     return(invisible(NULL))
   }
 
@@ -806,7 +942,8 @@ process_message <- function(msg) {
         plots        = out$inline_plots,
         dataframes   = out$inline_dfs_serialized,
         output_order = if (length(out$inline_order) > 0) out$inline_order else NULL,
-        error        = error_msg
+        error        = error_msg,
+        error_trace  = out$error_trace
       ))
     }, error = function(e) {
       # Safety net: catch any unexpected error in the exec path and report it
@@ -819,7 +956,8 @@ process_message <- function(msg) {
         stderr     = "",
         plots      = list(),
         dataframes = list(),
-        error      = paste("Internal kernel error:", conditionMessage(e))
+        error      = paste("Internal kernel error:", conditionMessage(e)),
+        error_trace = format_error_trace(e, sys.calls())
       ))
     })
     return(invisible(NULL))
@@ -841,14 +979,193 @@ flush(stderr())
 con <- file("stdin", open = "r")
 on.exit(close(con), add = TRUE)
 
-# Snapshot kernel-defined names AFTER con is created so that reset() can
-# distinguish kernel internals from user-created variables.
-# "KERNEL_RESERVED" is added to the list so it protects itself. "line" and
-# "msg" are loop-local protocol temporaries that are assigned in .GlobalEnv.
-# "KERNEL_ATTACHED_PACKAGES" is the baseline search-path package set that
-# should survive interrupt recovery without being reattached.
-KERNEL_RESERVED <- c(ls(), "KERNEL_RESERVED", "line", "msg")
+KERNEL_WORKSPACE_REVISION <- 0L
+KERNEL_PLOT_RENDER_CACHE <- new.env(hash = TRUE, parent = emptyenv())
+KERNEL_PLOT_RENDER_CACHE_ORDER <- character(0)
+KERNEL_PLOT_RENDER_CACHE_LIMIT <- 24L
+KERNEL_DF_PREVIEW_CACHE <- new.env(hash = TRUE, parent = emptyenv())
+KERNEL_DF_PREVIEW_CACHE_ORDER <- character(0)
+KERNEL_DF_PREVIEW_CACHE_LIMIT <- 24L
+
+clear_cache_env <- function(env) {
+  cache_keys <- ls(envir = env, all.names = TRUE)
+  if (length(cache_keys) > 0) rm(list = cache_keys, envir = env)
+  invisible(NULL)
+}
+
+normalize_cache_order <- function(order, keys, limit) {
+  if (length(keys) == 0L) return(character(0))
+  preferred <- character(0)
+  if (is.character(order) && length(order) > 0L) {
+    preferred <- unique(order[order %in% keys])
+  }
+  normalized <- c(preferred, setdiff(keys, preferred))
+  if (length(normalized) > limit) normalized <- normalized[seq_len(limit)]
+  normalized
+}
+
+export_cache_entries <- function(env, order) {
+  keys <- ls(envir = env, all.names = TRUE)
+  if (length(keys) == 0L) return(NULL)
+  export_order <- normalize_cache_order(order, keys, length(keys))
+  mget(export_order, envir = env, inherits = FALSE)
+}
+
+restore_cache_entries <- function(env, entries, order, limit) {
+  clear_cache_env(env)
+  if (!is.list(entries) || length(entries) == 0L || is.null(names(entries))) {
+    return(character(0))
+  }
+  keys <- names(entries)
+  keys <- keys[nzchar(keys)]
+  if (length(keys) == 0L) return(character(0))
+  restore_order <- normalize_cache_order(order, keys, limit)
+  for (key in restore_order) {
+    assign(key, entries[[key]], envir = env)
+  }
+  restore_order
+}
+
+clear_plot_render_cache <- function() {
+  clear_cache_env(KERNEL_PLOT_RENDER_CACHE)
+  KERNEL_PLOT_RENDER_CACHE_ORDER <<- character(0)
+  invisible(NULL)
+}
+
+clear_df_preview_cache <- function() {
+  clear_cache_env(KERNEL_DF_PREVIEW_CACHE)
+  KERNEL_DF_PREVIEW_CACHE_ORDER <<- character(0)
+  invisible(NULL)
+}
+
+clear_inline_preview_caches <- function() {
+  clear_plot_render_cache()
+  clear_df_preview_cache()
+  invisible(NULL)
+}
+
+mark_workspace_revision_changed <- function() {
+  KERNEL_WORKSPACE_REVISION <<- KERNEL_WORKSPACE_REVISION + 1L
+  clear_inline_preview_caches()
+  invisible(KERNEL_WORKSPACE_REVISION)
+}
+
+plot_render_cache_key <- function(label, fig_w, fig_h, fig_dpi) {
+  paste(KERNEL_WORKSPACE_REVISION, label %||% "", fig_w, fig_h, fig_dpi, sep = "::")
+}
+
+cached_plot_render <- function(label, fig_w, fig_h, fig_dpi) {
+  key <- plot_render_cache_key(label, fig_w, fig_h, fig_dpi)
+  if (!exists(key, envir = KERNEL_PLOT_RENDER_CACHE, inherits = FALSE)) return(NULL)
+  KERNEL_PLOT_RENDER_CACHE_ORDER <<- c(
+    key,
+    KERNEL_PLOT_RENDER_CACHE_ORDER[KERNEL_PLOT_RENDER_CACHE_ORDER != key]
+  )
+  get(key, envir = KERNEL_PLOT_RENDER_CACHE, inherits = FALSE)
+}
+
+remember_plot_render <- function(label, fig_w, fig_h, fig_dpi, b64) {
+  if (is.null(b64) || !nzchar(b64)) return(invisible(NULL))
+  key <- plot_render_cache_key(label, fig_w, fig_h, fig_dpi)
+  assign(key, b64, envir = KERNEL_PLOT_RENDER_CACHE)
+  KERNEL_PLOT_RENDER_CACHE_ORDER <<- c(
+    key,
+    KERNEL_PLOT_RENDER_CACHE_ORDER[KERNEL_PLOT_RENDER_CACHE_ORDER != key]
+  )
+  while (length(KERNEL_PLOT_RENDER_CACHE_ORDER) > KERNEL_PLOT_RENDER_CACHE_LIMIT) {
+    stale_key <- KERNEL_PLOT_RENDER_CACHE_ORDER[[length(KERNEL_PLOT_RENDER_CACHE_ORDER)]]
+    rm(list = stale_key, envir = KERNEL_PLOT_RENDER_CACHE)
+    KERNEL_PLOT_RENDER_CACHE_ORDER <<- KERNEL_PLOT_RENDER_CACHE_ORDER[-length(KERNEL_PLOT_RENDER_CACHE_ORDER)]
+  }
+  invisible(b64)
+}
+
+df_preview_cache_key <- function(label, page_size) {
+  paste(KERNEL_WORKSPACE_REVISION, label %||% "", page_size, sep = "::")
+}
+
+cached_df_preview <- function(label, page_size) {
+  key <- df_preview_cache_key(label, page_size)
+  if (!exists(key, envir = KERNEL_DF_PREVIEW_CACHE, inherits = FALSE)) return(NULL)
+  KERNEL_DF_PREVIEW_CACHE_ORDER <<- c(
+    key,
+    KERNEL_DF_PREVIEW_CACHE_ORDER[KERNEL_DF_PREVIEW_CACHE_ORDER != key]
+  )
+  get(key, envir = KERNEL_DF_PREVIEW_CACHE, inherits = FALSE)
+}
+
+remember_df_preview <- function(label, page_size, serialized) {
+  if (!is.list(serialized) || length(serialized) == 0L) return(invisible(NULL))
+  key <- df_preview_cache_key(label, page_size)
+  assign(key, serialized, envir = KERNEL_DF_PREVIEW_CACHE)
+  KERNEL_DF_PREVIEW_CACHE_ORDER <<- c(
+    key,
+    KERNEL_DF_PREVIEW_CACHE_ORDER[KERNEL_DF_PREVIEW_CACHE_ORDER != key]
+  )
+  while (length(KERNEL_DF_PREVIEW_CACHE_ORDER) > KERNEL_DF_PREVIEW_CACHE_LIMIT) {
+    stale_key <- KERNEL_DF_PREVIEW_CACHE_ORDER[[length(KERNEL_DF_PREVIEW_CACHE_ORDER)]]
+    rm(list = stale_key, envir = KERNEL_DF_PREVIEW_CACHE)
+    KERNEL_DF_PREVIEW_CACHE_ORDER <<- KERNEL_DF_PREVIEW_CACHE_ORDER[-length(KERNEL_DF_PREVIEW_CACHE_ORDER)]
+  }
+  invisible(serialized)
+}
+
+serialise_df_inline <- function(df_name, df, page_size = 2000, allow_cache = FALSE) {
+  if (allow_cache) {
+    cached <- cached_df_preview(df_name, page_size)
+    if (!is.null(cached)) return(cached)
+  }
+  serialized <- serialise_df(df_name, df, page = 0, page_size = page_size)
+  if (allow_cache) remember_df_preview(df_name, page_size, serialized)
+  serialized
+}
+
+snapshot_kernel_state <- function() {
+  list(
+    workspace_revision = KERNEL_WORKSPACE_REVISION,
+    plot_render_cache = export_cache_entries(KERNEL_PLOT_RENDER_CACHE, KERNEL_PLOT_RENDER_CACHE_ORDER),
+    plot_render_cache_order = KERNEL_PLOT_RENDER_CACHE_ORDER,
+    df_preview_cache = export_cache_entries(KERNEL_DF_PREVIEW_CACHE, KERNEL_DF_PREVIEW_CACHE_ORDER),
+    df_preview_cache_order = KERNEL_DF_PREVIEW_CACHE_ORDER
+  )
+}
+
+restore_kernel_state <- function(state = NULL) {
+  revision <- suppressWarnings(as.integer(state[["workspace_revision"]] %||% 0L))
+  if (!is.finite(revision) || is.na(revision) || revision < 0L) revision <- 0L
+  KERNEL_WORKSPACE_REVISION <<- revision
+  KERNEL_PLOT_RENDER_CACHE_ORDER <<- restore_cache_entries(
+    KERNEL_PLOT_RENDER_CACHE,
+    state[["plot_render_cache"]] %||% NULL,
+    state[["plot_render_cache_order"]] %||% character(0),
+    KERNEL_PLOT_RENDER_CACHE_LIMIT
+  )
+  KERNEL_DF_PREVIEW_CACHE_ORDER <<- restore_cache_entries(
+    KERNEL_DF_PREVIEW_CACHE,
+    state[["df_preview_cache"]] %||% NULL,
+    state[["df_preview_cache_order"]] %||% character(0),
+    KERNEL_DF_PREVIEW_CACHE_LIMIT
+  )
+  invisible(NULL)
+}
+
+is_cacheable_plot_expression <- function(code) {
+  if (is.null(code) || !nzchar(code)) return(FALSE)
+  !code_mutates_workspace(code)
+}
+
+code_mutates_workspace <- function(code) {
+  if (is.null(code) || !nzchar(code)) return(FALSE)
+  grepl("(^|[^=!<>])(<-|<<-|->>|->|=(?!=))", code, perl = TRUE) ||
+    grepl("\\b(assign|rm|library|require|source|load|attach|detach|setwd|options|par|theme_set|dev\\.off|graphics\\.off)\\s*\\(", code, perl = TRUE)
+}
+
+# Snapshot kernel-defined names AFTER all helper functions and cache globals are
+# created so reset()/vars() can distinguish extension internals from user code.
+# "line" and "msg" are loop-local protocol temporaries that are assigned in
+# .GlobalEnv while the main loop is running.
 KERNEL_ATTACHED_PACKAGES <- grep("^package:", search(), value = TRUE)
+KERNEL_RESERVED <- c(ls(), "KERNEL_RESERVED", "line", "msg")
 
 repeat {
   # Wrap readLines so that a stray SIGINT arriving between messages (e.g. a

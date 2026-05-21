@@ -18,21 +18,29 @@ R Notebook works well with AI-powered editing and review tools, including GitHub
 
 ## Preview
 
-### Notebook preview
+### Editing code with Cursor
 
-![Notebook preview](images/Notebook-preview.png)
+![Editing code with Cursor](images/Editing%20codes%20with%20Cursor.png)
 
-### Inline viewing of output
+### Inline image rendering
 
-![Inline viewing of output](images/Inline-viewing-of-output.png)
+![Inline image rendering](images/Support%20for%20in-line%20rendering%20of%20images.png)
 
-### AI-assisted editing in Cursor
+### Inline data-frame viewing
 
-![Support for Cursor](images/Support-for-Cursor.png)
+![Inline data-frame viewing](images/Support%20for%20in-line%20view%20of%20data%20frames.png)
 
-### Multi-session support
+### Detailed console output
 
-![Multi-session support](images/multi-session-support.png)
+![Detailed console output](images/Detailed%20Console%20Output.png)
+
+### Detailed error panel with Traceback
+
+![Detailed error panel with Traceback](images/Detailed%20Error%20Panel%20with%20TraceBack.png)
+
+### Multiple R sessions
+
+![Multiple R sessions](images/Support%20for%20running%20multiple%20R%20sessions.png)
 
 ## Build From Source
 
@@ -47,4 +55,4 @@ npm run build
 npm run package
 ```
 
-Version `1.2.2` packages into the project root as `r-notebook-1.2.2.vsix`.
+Version `1.5.1` packages into the project root as `r-notebook-1.5.1.vsix`.

@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.5.1
+- Bug fixes
+
+## 1.5.0
+- Fixed bugs related to stability and performance issues
+- Updated the Error panel to include more details on Traceback
+
+## 1.4.0
+- Made automatic variable refresh lazy so chunk execution no longer waits on workspace inspection after every run
+- Kept interrupt recovery checkpointing unchanged
+
+## 1.2.9
+- Fixed bugs
+
+## 1.2.8
+- Fixed `.ipynb` activation on stable Cursor / VS Code builds by skipping unsupported proposed kernel-source registration, which restores notebook toolbar actions
+- Fixed `.ipynb` notebook toolbar actions for `Restart Kernel`, `Interrupt Kernel`, `Show Session Variables`, and `Export`
+- Displayed dataframe column type labels in `.ipynb` outputs, matching `.Rmd` and `.qmd`
+
+## 1.2.5
+- Added top-right manual executable-path entries for Python and R notebook kernel selection
+- Improved kernel selection for `.Rmd`, `.qmd`, and `.ipynb` notebooks
+
+## 1.2.4
+- Fixed bugs related to selecting Python Kernels when working with `.ipynb` files
+- Improved external edit syncing and automatic save handling for large `.Rmd`, `.qmd`, and `.ipynb` notebooks
+
+## 1.2.3
+- Fixed bugs
+
 ## 1.2.2
 - Fixed bugs
 

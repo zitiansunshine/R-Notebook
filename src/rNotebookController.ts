@@ -23,11 +23,15 @@ import {
   COMMAND_IDS,
   NOTEBOOK_TYPE as R_NOTEBOOK_TYPE,
   affectsRConfig,
+  getRAdditionalExecutablePaths,
   getRConfigValue,
+  getRFigureDefaults,
+  mergeRFigureOptions,
+  rememberRExecutablePath,
   updateRConfigValue,
 } from './extensionIds';
 import { ExecResult, ProgressMessage, StreamMessage, StreamOutputMessage } from './kernelProtocol';
-import { discoverRKernels, RKernelDescriptor } from './kernelDiscovery';
+import { discoverRKernelsAsync, RKernelDescriptor } from './kernelDiscovery';
 import { getRememberedRNotebookKernel, rememberRNotebookKernel } from './notebookKernelState';
 import {
   notebookOutputItemsFromExecResult,
@@ -49,14 +53,48 @@ type LiveExecutionState = {
   dirty: boolean;      // has unrendered stream output
   rendering: boolean;  // replaceOutput in-flight
   renderPromise: Promise<void> | null;
+  lastRenderStartedAt: number;
   completed: boolean;
 };
 
+type RKernelActionDescriptor = {
+  id: 'action:manual';
+  label: string;
+  description?: string;
+  detail?: string;
+  action: 'manual';
+};
+
+type RControllerDescriptor = RKernelDescriptor | RKernelActionDescriptor;
+
 type RControllerEntry = {
   controller: vscode.NotebookController;
-  descriptor: RKernelDescriptor;
+  descriptor: RControllerDescriptor;
   selectionDisposable: vscode.Disposable;
 };
+
+function isActionDescriptor(descriptor: RControllerDescriptor): descriptor is RKernelActionDescriptor {
+  return 'action' in descriptor;
+}
+
+const OUTPUT_UPDATE_TIMEOUT_MS = 15_000;
+const LIVE_RENDER_INTERVAL_MS = 100;
+const LARGE_CONSOLE_CHARS = 200_000;
+const HUGE_CONSOLE_CHARS = 1_000_000;
+const LARGE_CONSOLE_RENDER_INTERVAL_MS = 1_000;
+const HUGE_CONSOLE_RENDER_INTERVAL_MS = 3_000;
+
+class OutputUpdateTimeoutError extends Error {
+  constructor(label: string) {
+    super(`Notebook ${label} timed out`);
+    this.name = 'OutputUpdateTimeoutError';
+  }
+}
+
+function isOutputUpdateTimeout(err: unknown): boolean {
+  return err instanceof OutputUpdateTimeoutError
+    || (err instanceof Error && err.name === 'OutputUpdateTimeoutError');
+}
 
 export class RNotebookController {
   private readonly controllers = new Map<string, RControllerEntry>();
@@ -72,6 +110,7 @@ export class RNotebookController {
   private kernelDescriptors: RKernelDescriptor[] = [];
   private renderInterval: ReturnType<typeof setInterval> | null = null;
   private varNotifier?: VariableNotifier;
+  private kernelCatalogRefreshSeq = 0;
 
   constructor(
     ctx: vscode.ExtensionContext,
@@ -80,7 +119,7 @@ export class RNotebookController {
   ) {
     this.extensionId = ctx.extension.id;
     this.varNotifier = varNotifier;
-    this.refreshKernelCatalog();
+    void this.refreshKernelCatalog();
     this.disposables.push(
       vscode.workspace.onDidOpenNotebookDocument((notebook) => {
         if (notebook.notebookType !== NOTEBOOK_TYPE) return;
@@ -95,8 +134,8 @@ export class RNotebookController {
         void this.restoreNotebookOutputs(event.notebook);
       }),
       vscode.workspace.onDidChangeConfiguration((event) => {
-        if (affectsRConfig(event, 'rPath')) {
-          this.refreshKernelCatalog();
+        if (affectsRConfig(event, 'rPath') || affectsRConfig(event, 'additionalRPaths')) {
+          void this.refreshKernelCatalog();
         }
       }),
     );
@@ -146,12 +185,16 @@ export class RNotebookController {
     }
 
     await updateRConfigValue('rPath', pick.descriptor.rPath, vscode.ConfigurationTarget.Global);
-    this.refreshKernelCatalog();
+    void this.refreshKernelCatalog();
     vscode.window.showInformationMessage(`R kernel path set to: ${pick.descriptor.rPath}`);
   }
 
   private rBinPath(): string {
     return getRConfigValue('rPath', 'Rscript');
+  }
+
+  private additionalRPaths(): string[] {
+    return getRAdditionalExecutablePaths();
   }
 
   private execTimeoutMs(): number {
@@ -160,62 +203,120 @@ export class RNotebookController {
 
   private availableDescriptors(): RKernelDescriptor[] {
     if (this.kernelDescriptors.length === 0) {
-      this.refreshKernelCatalog();
+      const configuredR = this.rBinPath();
+      this.installKernelCatalog([this.fallbackDescriptor(configuredR)]);
+      void this.refreshKernelCatalog();
     }
     return this.kernelDescriptors;
   }
 
-  private refreshKernelCatalog(): void {
+  private manualDescriptor(
+    rPath: string,
+    overrides?: {
+      displayName?: string;
+      kernelspecName?: string;
+    },
+  ): RKernelDescriptor {
+    const parts = rPath.split(/[\\/]/).filter(Boolean);
+    const base = parts[parts.length - 1] ?? rPath;
+    const displayName = overrides?.displayName ?? (base === rPath ? `R (${rPath})` : `R (${base})`);
+    return {
+      id: `executable:${rPath}`,
+      label: displayName,
+      description: 'R executable',
+      detail: rPath,
+      rPath,
+      displayName,
+      kernelspecName: overrides?.kernelspecName,
+      source: 'executable',
+    };
+  }
+
+  private ensureControllerForDescriptor(descriptor: RKernelDescriptor): RControllerEntry {
+    const controllerId = this.controllerIdForDescriptor(descriptor);
+    const existingDescriptorIndex = this.kernelDescriptors.findIndex((candidate) =>
+      candidate.id === descriptor.id,
+    );
+    if (existingDescriptorIndex >= 0) {
+      this.kernelDescriptors[existingDescriptorIndex] = descriptor;
+    } else {
+      this.kernelDescriptors.push(descriptor);
+    }
+
+    const existing = this.controllers.get(controllerId);
+    if (existing) {
+      existing.descriptor = descriptor;
+      existing.controller.label = descriptor.displayName;
+      existing.controller.description = descriptor.description ?? 'R kernel';
+      existing.controller.detail = descriptor.rPath;
+      return existing;
+    }
+
+    const controller = vscode.notebooks.createNotebookController(
+      controllerId,
+      NOTEBOOK_TYPE,
+      descriptor.displayName,
+    );
+    controller.supportedLanguages = ['r', 'R'];
+    controller.supportsExecutionOrder = false;
+    controller.description = descriptor.description ?? 'R kernel';
+    controller.detail = descriptor.rPath;
+    controller.executeHandler = this._execute.bind(this);
+    controller.interruptHandler = (notebook) => {
+      this.interruptNotebook(notebook.uri.toString());
+    };
+
+    const selectionDisposable = controller.onDidChangeSelectedNotebooks((event) => {
+      if (!event.selected) return;
+      const selectedDescriptor = this.controllers.get(controller.id)?.descriptor ?? descriptor;
+      if (isActionDescriptor(selectedDescriptor)) {
+        void this.handleActionSelection(event.notebook, selectedDescriptor);
+        return;
+      }
+      void this.handleControllerSelection(event.notebook, selectedDescriptor, controller.id);
+    });
+
+    const entry = { controller, descriptor, selectionDisposable };
+    this.controllers.set(controllerId, entry);
+    return entry;
+  }
+
+  private async refreshKernelCatalog(): Promise<void> {
+    const refreshSeq = ++this.kernelCatalogRefreshSeq;
     const configuredR = this.rBinPath();
-    const discovered = discoverRKernels(configuredR);
-    this.kernelDescriptors = discovered.length > 0
-      ? discovered
-      : [{
-        id: `executable:${configuredR}`,
-        label: configuredR,
-        description: 'R executable',
-        detail: configuredR,
-        rPath: configuredR,
-        displayName: configuredR,
-        source: 'executable',
-      }];
+    const additionalRPaths = this.additionalRPaths();
+    const fallback = this.fallbackDescriptor(configuredR);
+    if (this.kernelDescriptors.length === 0) {
+      this.installKernelCatalog([fallback]);
+    }
+
+    const discovered = await discoverRKernelsAsync(configuredR, additionalRPaths);
+    if (refreshSeq !== this.kernelCatalogRefreshSeq) return;
+    this.installKernelCatalog(discovered.length > 0 ? discovered : [fallback]);
+  }
+
+  private fallbackDescriptor(configuredR: string): RKernelDescriptor {
+    return {
+      id: `executable:${configuredR}`,
+      label: configuredR,
+      description: 'R executable',
+      detail: configuredR,
+      rPath: configuredR,
+      displayName: configuredR,
+      source: 'executable',
+    };
+  }
+
+  private installKernelCatalog(descriptors: RKernelDescriptor[]): void {
+    this.kernelDescriptors = descriptors;
     const nextIds = new Set<string>();
 
     for (const descriptor of this.kernelDescriptors) {
-      const controllerId = this.controllerIdForDescriptor(descriptor);
+      const controllerId = this.ensureControllerForDescriptor(descriptor).controller.id;
       nextIds.add(controllerId);
-
-      const existing = this.controllers.get(controllerId);
-      if (existing) {
-        existing.descriptor = descriptor;
-        existing.controller.label = descriptor.displayName;
-        existing.controller.description = descriptor.description ?? 'R kernel';
-        existing.controller.detail = descriptor.rPath;
-        continue;
-      }
-
-      const controller = vscode.notebooks.createNotebookController(
-        controllerId,
-        NOTEBOOK_TYPE,
-        descriptor.displayName,
-      );
-      controller.supportedLanguages = ['r', 'R'];
-      controller.supportsExecutionOrder = false;
-      controller.description = descriptor.description ?? 'R kernel';
-      controller.detail = descriptor.rPath;
-      controller.executeHandler = this._execute.bind(this);
-      controller.interruptHandler = (notebook) => {
-        this.interruptNotebook(notebook.uri.toString());
-      };
-
-      const selectionDisposable = controller.onDidChangeSelectedNotebooks((event) => {
-        if (!event.selected) return;
-        const selectedDescriptor = this.controllers.get(controller.id)?.descriptor ?? descriptor;
-        void this.handleControllerSelection(event.notebook, selectedDescriptor, controller.id);
-      });
-
-      this.controllers.set(controllerId, { controller, descriptor, selectionDisposable });
     }
+
+    nextIds.add(this.ensureManualPathController().controller.id);
 
     for (const [controllerId, entry] of this.controllers) {
       if (nextIds.has(controllerId)) continue;
@@ -227,7 +328,51 @@ export class RNotebookController {
     this.syncAllNotebookAffinities();
   }
 
-  private controllerIdForDescriptor(descriptor: RKernelDescriptor): string {
+  private ensureManualPathController(): RControllerEntry {
+    const descriptor: RKernelActionDescriptor = {
+      id: 'action:manual',
+      label: 'Rscript executable path...',
+      description: 'Manual path',
+      detail: 'Enter the full path to an Rscript executable',
+      action: 'manual',
+    };
+    const controllerId = this.controllerIdForDescriptor(descriptor);
+    const existing = this.controllers.get(controllerId);
+    if (existing) {
+      existing.descriptor = descriptor;
+      existing.controller.label = descriptor.label;
+      existing.controller.description = descriptor.description;
+      existing.controller.detail = descriptor.detail;
+      return existing;
+    }
+
+    const controller = vscode.notebooks.createNotebookController(
+      controllerId,
+      NOTEBOOK_TYPE,
+      descriptor.label,
+    );
+    controller.supportedLanguages = ['r', 'R'];
+    controller.supportsExecutionOrder = false;
+    controller.description = descriptor.description;
+    controller.detail = descriptor.detail;
+    controller.executeHandler = async () => undefined;
+
+    const selectionDisposable = controller.onDidChangeSelectedNotebooks((event) => {
+      if (!event.selected) return;
+      const selectedDescriptor = this.controllers.get(controller.id)?.descriptor ?? descriptor;
+      if (!isActionDescriptor(selectedDescriptor)) return;
+      void this.handleActionSelection(event.notebook, selectedDescriptor);
+    });
+
+    const entry = { controller, descriptor, selectionDisposable };
+    this.controllers.set(controllerId, entry);
+    return entry;
+  }
+
+  private controllerIdForDescriptor(descriptor: RControllerDescriptor): string {
+    if (isActionDescriptor(descriptor)) {
+      return 'r-notebook-r-kernel-action:manual-path';
+    }
     return `r-notebook-r-kernel:${descriptor.id}`;
   }
 
@@ -257,7 +402,7 @@ export class RNotebookController {
     for (const entry of this.controllers.values()) {
       entry.controller.updateNotebookAffinity(
         notebook,
-        entry.descriptor.id === preferred.id
+        !isActionDescriptor(entry.descriptor) && entry.descriptor.id === preferred.id
           ? vscode.NotebookControllerAffinity.Preferred
           : vscode.NotebookControllerAffinity.Default,
       );
@@ -281,12 +426,22 @@ export class RNotebookController {
 
   private resolveDescriptorForNotebook(notebook: vscode.NotebookDocument): RKernelDescriptor {
     const remembered = getRememberedRNotebookKernel(notebook.uri.toString());
-    return this.availableDescriptors().find((descriptor) =>
+    const matched = this.availableDescriptors().find((descriptor) =>
       this.controllerIdForDescriptor(descriptor) === remembered?.controllerId
       || descriptor.kernelspecName === remembered?.kernelspecName
       || descriptor.displayName === remembered?.displayName
       || descriptor.rPath === remembered?.rPath,
-    ) ?? this.resolveDefaultDescriptor();
+    );
+    if (matched) return matched;
+    if (remembered?.rPath) {
+      const rememberedDescriptor = this.manualDescriptor(remembered.rPath, {
+        displayName: remembered.displayName,
+        kernelspecName: remembered.kernelspecName,
+      });
+      const ensuredDescriptor = this.ensureControllerForDescriptor(rememberedDescriptor).descriptor;
+      if (!isActionDescriptor(ensuredDescriptor)) return ensuredDescriptor;
+    }
+    return this.resolveDefaultDescriptor();
   }
 
   private async handleControllerSelection(
@@ -312,21 +467,48 @@ export class RNotebookController {
     this.syncNotebookAffinities(notebook);
   }
 
+  private async handleActionSelection(
+    notebook: vscode.NotebookDocument,
+    descriptor: RKernelActionDescriptor,
+  ): Promise<void> {
+    if (notebook.notebookType !== NOTEBOOK_TYPE) return;
+
+    const currentDescriptor = this.resolveDescriptorForNotebook(notebook);
+    const rPath = await vscode.window.showInputBox({
+      title: 'R Kernel Path',
+      prompt: 'Full path to Rscript (for example /usr/local/bin/Rscript)',
+      value: currentDescriptor.rPath,
+    });
+    const trimmedRPath = rPath?.trim();
+
+    if (!trimmedRPath) {
+      await this.selectDescriptorForNotebook(notebook, currentDescriptor);
+      return;
+    }
+
+    const pickedDescriptor = this.manualDescriptor(trimmedRPath);
+    await this.selectDescriptorForNotebook(notebook, pickedDescriptor);
+    await rememberRExecutablePath(pickedDescriptor.rPath);
+    vscode.window.showInformationMessage(`R kernel path set to: ${pickedDescriptor.rPath}`);
+  }
+
   private async selectDescriptorForNotebook(
     notebook: vscode.NotebookDocument,
     descriptor: RKernelDescriptor,
   ): Promise<void> {
-    const controllerId = this.controllerIdForDescriptor(descriptor);
+    const ensuredDescriptor = this.ensureControllerForDescriptor(descriptor).descriptor;
+    if (isActionDescriptor(ensuredDescriptor)) return;
+    const controllerId = this.controllerIdForDescriptor(ensuredDescriptor);
     rememberRNotebookKernel(notebook.uri.toString(), {
       controllerId,
-      displayName: descriptor.displayName,
-      kernelspecName: descriptor.kernelspecName,
-      rPath: descriptor.rPath,
+      displayName: ensuredDescriptor.displayName,
+      kernelspecName: ensuredDescriptor.kernelspecName,
+      rPath: ensuredDescriptor.rPath,
     });
 
     const didSelect = await this.selectNotebookController(notebook, controllerId);
     if (!didSelect) {
-      await this.handleControllerSelection(notebook, descriptor, controllerId);
+      await this.handleControllerSelection(notebook, ensuredDescriptor, controllerId);
       return;
     }
 
@@ -390,8 +572,10 @@ export class RNotebookController {
     notebook: vscode.NotebookDocument,
     ctrl: vscode.NotebookController,
   ): Promise<void> {
-    const descriptor = this.controllerEntryForController(ctrl)?.descriptor
-      ?? this.resolveDescriptorForNotebook(notebook);
+    const selectedDescriptor = this.controllerEntryForController(ctrl)?.descriptor;
+    const descriptor = selectedDescriptor && !isActionDescriptor(selectedDescriptor)
+      ? selectedDescriptor
+      : this.resolveDescriptorForNotebook(notebook);
     rememberRNotebookKernel(docUri, {
       controllerId: this.controllerIdForDescriptor(descriptor),
       displayName: descriptor.displayName,
@@ -404,9 +588,6 @@ export class RNotebookController {
     let startError: Error | undefined;
     try {
       await session.start();
-      if (session.cachedVars().vars.length === 0) {
-        await this.refreshVariableCache(session);
-      }
     } catch (err: any) {
       startError = err instanceof Error ? err : new Error(String(err));
     }
@@ -431,6 +612,7 @@ export class RNotebookController {
         dirty: false,
         rendering: false,
         renderPromise: null,
+        lastRenderStartedAt: 0,
         completed: false,
       };
       this.liveExecutions.set(liveKey, liveState);
@@ -438,13 +620,13 @@ export class RNotebookController {
       const cancelDisp = execution.token.onCancellationRequested(() => session.interrupt());
 
       try {
+        await this.clearExecutionOutputForNewRun(liveState);
         await this.replaceExecutionOutput(liveState, liveState.result, chunkId, { running: true });
         if (startError) throw startError;
-        const result = mergeConsoleResult(await session.exec(chunkId, code, {
-          fig_width:  opts['fig_width']  as number | undefined,
-          fig_height: opts['fig_height'] as number | undefined,
-          dpi:        opts['dpi']        as number | undefined,
-        }), liveState.result);
+        const result = mergeConsoleResult(
+          await session.exec(chunkId, code, mergeRFigureOptions(opts)),
+          liveState.result,
+        );
         liveState.completed = true;
         await this.waitForPendingRender(liveState);
         if (this.deletedLiveCellDocuments.has(cellDocUri)) continue;
@@ -455,7 +637,6 @@ export class RNotebookController {
           notebookOutputFromExecResult(result, chunkId).length > 0 ? result : null,
         );
         execution.end(!result.error, Date.now());
-        await this.refreshVariableCache(session);
       } catch (err: any) {
         const errorResult: ExecResult = {
           ...liveState.result,
@@ -471,7 +652,6 @@ export class RNotebookController {
           notebookOutputFromExecResult(errorResult, chunkId).length > 0 ? errorResult : null,
         );
         execution.end(false, Date.now());
-        await this.refreshVariableCache(session);
       } finally {
         cancelDisp.dispose();
         this.liveCellDocuments.delete(cellDocUri);
@@ -507,10 +687,45 @@ export class RNotebookController {
 
   public interruptNotebook(docUri: string): boolean {
     const session = getSession(docUri);
-    const interrupted = session?.isBusy() ?? false;
+    const hasLiveState = this.hasLiveExecutionState(docUri);
+    const interrupted = (session?.isBusy() ?? false) || hasLiveState;
     this.bumpQueueEpoch(docUri);
     session?.interrupt();
+    if (!session?.isBusy() && hasLiveState) {
+      this.clearLiveExecutionState(docUri);
+    }
     return interrupted;
+  }
+
+  public isInterruptInProgress(docUri: string): boolean {
+    return getSession(docUri)?.isInterruptInProgress() ?? false;
+  }
+
+  public interruptRecoveryState(docUri: string): 'current' | 'stale' | 'none' {
+    return getSession(docUri)?.recoveryCheckpointState() ?? 'none';
+  }
+
+  public async forceInterruptNotebook(docUri: string): Promise<boolean> {
+    const session = getSession(docUri);
+    const hasLiveState = this.hasLiveExecutionState(docUri);
+    const interrupted = (session?.isBusy() ?? false) || hasLiveState;
+    if (!interrupted) return false;
+
+    this.bumpQueueEpoch(docUri);
+    await session?.forceInterruptAndRecover();
+    this.clearLiveExecutionState(docUri);
+    return true;
+  }
+
+  public hasPendingExecution(docUri: string): boolean {
+    if (this.notebookQueues.has(docUri)) return true;
+    const session = getSession(docUri);
+    if (session?.isBusy()) return true;
+    const prefix = `${docUri}::`;
+    for (const liveKey of this.liveExecutions.keys()) {
+      if (liveKey.startsWith(prefix)) return true;
+    }
+    return false;
   }
 
   public async restartNotebook(notebook: vscode.NotebookDocument): Promise<boolean> {
@@ -530,6 +745,7 @@ export class RNotebookController {
   private clearLiveExecutionState(docUri: string): void {
     for (const [liveKey, state] of this.liveExecutions) {
       if (!liveKey.startsWith(`${docUri}::`)) continue;
+      void this.safeEndExecution(state.execution);
       this.liveExecutions.delete(liveKey);
       this.liveCellDocuments.delete(state.cellDocUri);
       this.deletedLiveCellDocuments.delete(state.cellDocUri);
@@ -632,6 +848,7 @@ export class RNotebookController {
   private startRenderLoop(): void {
     if (this.renderInterval) return;
     this.renderInterval = setInterval(() => {
+      const now = Date.now();
       if (this.liveExecutions.size === 0) {
         clearInterval(this.renderInterval!);
         this.renderInterval = null;
@@ -640,8 +857,10 @@ export class RNotebookController {
       for (const state of this.liveExecutions.values()) {
         if (!state.dirty || state.completed || state.rendering) continue;
         if (this.deletedLiveCellDocuments.has(state.cellDocUri)) continue;
+        if (!this.shouldRenderLiveState(state, now)) continue;
         state.dirty = false;
         state.rendering = true;
+        state.lastRenderStartedAt = now;
         const renderPromise = this.replaceExecutionOutput(
           state,
           state.result,
@@ -658,18 +877,38 @@ export class RNotebookController {
             }
           });
       }
-    }, 100);
+    }, LIVE_RENDER_INTERVAL_MS);
+  }
+
+  private shouldRenderLiveState(state: LiveExecutionState, now: number): boolean {
+    if (!state.output) return true;
+    const consoleLength = state.result.console?.length ?? 0;
+    const minInterval =
+      consoleLength >= HUGE_CONSOLE_CHARS
+        ? HUGE_CONSOLE_RENDER_INTERVAL_MS
+        : consoleLength >= LARGE_CONSOLE_CHARS
+          ? LARGE_CONSOLE_RENDER_INTERVAL_MS
+          : LIVE_RENDER_INTERVAL_MS;
+    return now - state.lastRenderStartedAt >= minInterval;
   }
 
   private async waitForPendingRender(state: LiveExecutionState): Promise<void> {
     if (!state.renderPromise) return;
     try {
-      await state.renderPromise;
+      await this.withOutputTimeout(state.renderPromise, 'render');
     } catch {}
   }
 
   private liveKey(docUri: string, chunkId: string): string {
     return `${docUri}::${chunkId}`;
+  }
+
+  private hasLiveExecutionState(docUri: string): boolean {
+    const prefix = `${docUri}::`;
+    for (const liveKey of this.liveExecutions.keys()) {
+      if (liveKey.startsWith(prefix)) return true;
+    }
+    return false;
   }
 
   private queueEpoch(docUri: string): number {
@@ -714,22 +953,74 @@ export class RNotebookController {
     const items = notebookOutputItemsFromExecResult(result, chunkId, options);
     if (!items) {
       state.output = null;
-      await state.execution.clearOutput();
+      await this.withOutputTimeout(
+        state.execution.clearOutput(),
+        'clearOutput',
+      ).catch(() => undefined);
       return;
     }
     if (!state.output) {
-      state.output = new vscode.NotebookCellOutput(items, {
-        chunkId,
-        running: Boolean(options?.running),
-      });
-      await state.execution.replaceOutput([state.output]);
+      await this.replaceExecutionOutputFromScratch(state, items, chunkId, options);
       return;
     }
     state.output.metadata = {
       chunkId,
       running: Boolean(options?.running),
     };
-    await state.execution.replaceOutputItems(items, state.output);
+    try {
+      await this.withOutputTimeout(
+        state.execution.replaceOutputItems(items, state.output),
+        'replaceOutputItems',
+      );
+    } catch (err) {
+      if (isOutputUpdateTimeout(err)) return;
+      await this.replaceExecutionOutputFromScratch(state, items, chunkId, options);
+    }
+  }
+
+  private async replaceExecutionOutputFromScratch(
+    state: LiveExecutionState,
+    items: vscode.NotebookCellOutputItem[],
+    chunkId: string,
+    options?: { running?: boolean },
+  ): Promise<void> {
+    state.output = new vscode.NotebookCellOutput(items, {
+      chunkId,
+      running: Boolean(options?.running),
+    });
+    await this.withOutputTimeout(
+      state.execution.replaceOutput([state.output]),
+      'replaceOutput',
+    ).catch((err) => {
+      if (!isOutputUpdateTimeout(err)) {
+        state.output = null;
+      }
+    });
+  }
+
+  private withOutputTimeout<T>(promise: Thenable<T>, label: string): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new OutputUpdateTimeoutError(label)),
+        OUTPUT_UPDATE_TIMEOUT_MS,
+      );
+      Promise.resolve(promise).then(
+        (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      );
+    });
+  }
+
+  private async safeEndExecution(execution: vscode.NotebookCellExecution): Promise<void> {
+    try {
+      execution.end(false, Date.now());
+    } catch {}
   }
 
   private async restoreNotebookOutputs(notebook: vscode.NotebookDocument): Promise<void> {
@@ -738,26 +1029,31 @@ export class RNotebookController {
     const cached = this.outputStore.getForNotebook(notebook);
     if (cached.size === 0) return;
 
-    // Do not create new cell executions while any notebook is actively running.
-    // Calling createNotebookCellExecution on this controller while other cells are
-    // executing can cause VS Code to cancel those in-progress executions.
+    // Avoid restoring outputs while any notebook is actively running so we do
+    // not race live execution updates with a restore pass.
     if (this.liveExecutions.size > 0) return;
 
     this.restoreInFlight.add(docUri);
     try {
+      const edits: vscode.NotebookEdit[] = [];
       for (const cell of notebook.getCells()) {
         if (cell.kind !== vscode.NotebookCellKind.Code) continue;
         if (cell.outputs.length > 0) continue;
         if (this.liveCellDocuments.has(cell.document.uri.toString())) continue;
         const result = cached.get(cell.index);
         if (!result) continue;
-        const controller = this.preferredControllerForNotebook(notebook);
-        if (!controller) continue;
-        const execution = controller.createNotebookCellExecution(cell);
-        execution.start(Date.now());
-        await execution.replaceOutput(notebookOutputFromExecResult(result, `nb-${cell.index}`));
-        execution.end(!result.error, Date.now());
+        edits.push(
+          buildNotebookCellOutputsEdit(
+            cell,
+            notebookOutputFromExecResult(result, `nb-${cell.index}`),
+          ),
+        );
       }
+      if (edits.length === 0) return;
+
+      const edit = new vscode.WorkspaceEdit();
+      edit.set(notebook.uri, edits);
+      await vscode.workspace.applyEdit(edit);
     } finally {
       this.restoreInFlight.delete(docUri);
     }
@@ -788,12 +1084,12 @@ export class RNotebookController {
     await this.restoreNotebookOutputs(notebook);
   }
 
-  private async refreshVariableCache(
-    session: ReturnType<typeof getOrCreateSession>,
-  ): Promise<void> {
-    try {
-      await session.vars();
-    } catch {}
+  private async clearExecutionOutputForNewRun(state: LiveExecutionState): Promise<void> {
+    state.output = null;
+    await this.withOutputTimeout(
+      state.execution.clearOutput(),
+      'clearOutput',
+    ).catch(() => undefined);
   }
 
   /** Clean up when the extension deactivates */
@@ -806,8 +1102,43 @@ export class RNotebookController {
     for (const entry of this.controllers.values()) {
       entry.selectionDisposable.dispose();
       entry.controller.dispose();
+      }
     }
   }
+
+function buildNotebookCellOutputsEdit(
+  cell: vscode.NotebookCell,
+  outputs: readonly vscode.NotebookCellOutput[],
+): vscode.NotebookEdit {
+  const notebookEdit = vscode.NotebookEdit as typeof vscode.NotebookEdit & {
+    updateCellOutputs?: (
+      index: number,
+      outputs: readonly vscode.NotebookCellOutput[],
+    ) => vscode.NotebookEdit;
+    replaceCells?: (
+      range: vscode.NotebookRange,
+      newCells: readonly vscode.NotebookCellData[],
+    ) => vscode.NotebookEdit;
+  };
+
+  if (typeof notebookEdit.updateCellOutputs === 'function') {
+    return notebookEdit.updateCellOutputs(cell.index, outputs);
+  }
+  if (typeof notebookEdit.replaceCells !== 'function') {
+    throw new Error('Notebook output edit API is unavailable in this editor build.');
+  }
+
+  const replacement = new vscode.NotebookCellData(
+    cell.kind,
+    cell.document.getText(),
+    cell.document.languageId,
+  );
+  replacement.metadata = cell.metadata as vscode.NotebookCellMetadata | undefined;
+  replacement.outputs = [...outputs];
+  return notebookEdit.replaceCells(
+    new vscode.NotebookRange(cell.index, cell.index + 1),
+    [replacement],
+  );
 }
 
 function emptyExecResult(chunkId: string, sourceCode = ''): ExecResult {
@@ -868,11 +1199,14 @@ type FigField = {
   max:   number;
 };
 
-const FIG_FIELDS: FigField[] = [
-  { key: 'fig_width',  label: 'fig.width',  unit: 'in',  def: 7,   min: 1,  max: 20  },
-  { key: 'fig_height', label: 'fig.height', unit: 'in',  def: 5,   min: 1,  max: 20  },
-  { key: 'dpi',        label: 'dpi',        unit: 'dpi', def: 120, min: 72, max: 600 },
-];
+function figFields(): FigField[] {
+  const defaults = getRFigureDefaults();
+  return [
+    { key: 'fig_width',  label: 'fig.width',  unit: 'in',  def: defaults.fig_width,  min: 1,  max: 20  },
+    { key: 'fig_height', label: 'fig.height', unit: 'in',  def: defaults.fig_height, min: 1,  max: 20  },
+    { key: 'dpi',        label: 'dpi',        unit: 'dpi', def: defaults.dpi,        min: 72, max: 600 },
+  ];
+}
 
 /**
  * Status bar provider — shows current fig settings on every R code cell.
@@ -894,17 +1228,11 @@ export class RCellFigureStatusBar implements vscode.NotebookCellStatusBarItemPro
     if (!['r', 'R'].includes(cell.document.languageId)) return [];
 
     const opts = (cell.metadata?.options ?? {}) as Record<string, unknown>;
-    const fw  = opts['fig_width']  as number | undefined;
-    const fh  = opts['fig_height'] as number | undefined;
-    const dpi = opts['dpi']        as number | undefined;
-
-    const parts: string[] = [];
-    if (fw !== undefined || fh !== undefined)
-      parts.push(`${fw ?? 7}×${fh ?? 5}in`);
-    if (dpi !== undefined)
-      parts.push(`${dpi}dpi`);
-
-    const text = parts.length ? `⚙ ${parts.join(' · ')}` : '⚙ plot size';
+    const merged = mergeRFigureOptions(opts);
+    const hasCustom = opts['fig_width'] !== undefined
+      || opts['fig_height'] !== undefined
+      || opts['dpi'] !== undefined;
+    const text = `⚙ ${merged.fig_width}×${merged.fig_height}in · ${merged.dpi}dpi${hasCustom ? '' : ' default'}`;
 
     const item = new vscode.NotebookCellStatusBarItem(
       text,
@@ -939,7 +1267,7 @@ async function editCellFigureOptions(
     type PickItem = vscode.QuickPickItem & { field?: FigField; done?: true };
 
     const items: PickItem[] = [
-      ...FIG_FIELDS.map(f => {
+      ...figFields().map(f => {
         const cur = opts[f.key] as number | undefined;
         return {
           label:       `$(symbol-ruler) ${f.label}`,
@@ -1020,6 +1348,15 @@ export function registerFigureOptions(ctx: vscode.ExtensionContext): void {
       provider,
     ),
     provider,
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (
+        affectsRConfig(event, 'defaultFigWidth')
+        || affectsRConfig(event, 'defaultFigHeight')
+        || affectsRConfig(event, 'defaultDpi')
+      ) {
+        provider.refresh();
+      }
+    }),
   );
 
   ctx.subscriptions.push(
