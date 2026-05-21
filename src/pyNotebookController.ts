@@ -17,7 +17,7 @@ import {
   getPythonConfigValue,
   updatePythonConfigValue,
 } from './extensionIds';
-import { ExecResult, StreamMessage } from './kernelProtocol';
+import { ExecResult, ProgressMessage, StreamMessage } from './kernelProtocol';
 import { notebookOutputItemsFromExecResult } from './rmdOutputStore';
 import {
   discoverPythonKernelsAsync,
@@ -90,7 +90,7 @@ function isActionDescriptor(descriptor: PyControllerDescriptor): descriptor is P
   return 'action' in descriptor;
 }
 
-const OUTPUT_UPDATE_TIMEOUT_MS = 2_000;
+const OUTPUT_UPDATE_TIMEOUT_MS = 15_000;
 const PY_NOTEBOOK_SELECTIONS_STATE_KEY = 'pythonNotebookSelections';
 
 export class PyNotebookController implements vscode.Disposable {
@@ -466,6 +466,7 @@ export class PyNotebookController implements vscode.Disposable {
   private bindSession(docUri: string, session: ReturnType<typeof getOrCreatePySession>): void {
     if (this.boundSessions.has(session as object)) return;
     this.boundSessions.add(session as object);
+    session.on('progress', (msg: ProgressMessage) => this.handleProgress(docUri, msg));
     session.on('stream', (msg: StreamMessage) => this.handleStream(docUri, msg));
   }
 
@@ -483,6 +484,23 @@ export class PyNotebookController implements vscode.Disposable {
     return this.queueEpoch(docUri) !== runEpoch;
   }
 
+  private handleProgress(docUri: string, msg: ProgressMessage): void {
+    const state = this.liveExecutions.get(this.liveKey(docUri, msg.chunk_id));
+    if (!state || state.completed) return;
+    if (!msg.expr_code) return;
+    const segments = (state.result.console_segments ?? []).map((segment) => ({ ...segment }));
+    const segmentIndex = Number.isInteger(msg.segment_index) && msg.segment_index! >= 0
+      ? msg.segment_index!
+      : segments.length;
+    while (segments.length <= segmentIndex) {
+      segments.push({ code: '', output: '' });
+    }
+    segments[segmentIndex].code = msg.expr_code;
+    state.result.console_segments = segments;
+    state.dirty = true;
+    this.startRenderLoop();
+  }
+
   private handleStream(docUri: string, msg: StreamMessage): void {
     const state = this.liveExecutions.get(this.liveKey(docUri, msg.chunk_id));
     if (!state || state.completed || !msg.text) return;
@@ -497,12 +515,27 @@ export class PyNotebookController implements vscode.Disposable {
       !currentConsole.endsWith('\n') &&
       !msg.text.startsWith('\n');
     state.result.console = `${currentConsole}${needsSeparator ? '\n' : ''}${msg.text}`;
-    if (state.result.console_segments && state.result.console_segments.length > 0) {
+    if (state.result.console_segments) {
       const segments = state.result.console_segments.map((segment) => ({ ...segment }));
-      const lastSegment = segments[segments.length - 1];
+      const segmentIndex = Number.isInteger(msg.segment_index) && msg.segment_index! >= 0
+        ? msg.segment_index!
+        : undefined;
+      if (segmentIndex !== undefined) {
+        while (segments.length <= segmentIndex) {
+          segments.push({ code: '', output: '' });
+        }
+        if (typeof msg.segment_code === 'string' && msg.segment_code && !segments[segmentIndex].code) {
+          segments[segmentIndex].code = msg.segment_code;
+        }
+      }
+      if (segments.length === 0) {
+        segments.push({ code: '', output: '' });
+      }
+      const lastSegment = segmentIndex !== undefined
+        ? segments[segmentIndex]
+        : segments[segments.length - 1];
       const existingOutput = lastSegment.output ?? '';
-      const separator = existingOutput.length > 0 ? '\n' : '';
-      lastSegment.output = `${existingOutput}${separator}${msg.text}`;
+      lastSegment.output = `${existingOutput}${msg.text}`;
       state.result.console_segments = segments;
     }
     state.dirty = true;
@@ -950,7 +983,7 @@ function emptyExecResult(chunkId: string, sourceCode = ''): ExecResult {
     type: 'result',
     chunk_id: chunkId,
     source_code: sourceCode,
-    console_segments: sourceCode ? [{ code: sourceCode, output: '' }] : [],
+    console_segments: [],
     console: '',
     stdout: '',
     stderr: '',

@@ -155,6 +155,7 @@ export interface ProgressMessage {
   line: number;
   total: number;
   expr_code?: string;
+  segment_index?: number;
 }
 
 export interface StreamMessage {
@@ -162,6 +163,8 @@ export interface StreamMessage {
   chunk_id: string;
   stream: 'stdout' | 'stderr';
   text: string;
+  segment_index?: number;
+  segment_code?: string;
 }
 
 export interface StreamOutputMessage {

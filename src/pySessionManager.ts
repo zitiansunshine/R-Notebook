@@ -193,6 +193,10 @@ export class PySession extends EventEmitter {
       this.emit('stream', msg);
       return;
     }
+    if (msg.type === 'progress') {
+      this.emit('progress', msg);
+      return;
+    }
 
     const key = msg.chunk_id ?? '';
     const p   = this.pending.get(key);

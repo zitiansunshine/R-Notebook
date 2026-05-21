@@ -51,12 +51,14 @@ def _send(msg: dict) -> None:
 class _StreamingBuffer(io.TextIOBase):
     """Capture writes while forwarding them to the host as stream events."""
 
-    def __init__(self, chunk_id: str, stream_name: str, console_parts: list[str] | None = None):
+    def __init__(self, chunk_id: str, stream_name: str, console_parts: list[str] | None = None,
+                 active_segment_getter=None):
         super().__init__()
         self._chunk_id = chunk_id
         self._stream_name = stream_name
         self._buffer = io.StringIO()
         self._console_parts = console_parts
+        self._active_segment_getter = active_segment_getter
 
     def write(self, text: str) -> int:
         if not text:
@@ -64,12 +66,24 @@ class _StreamingBuffer(io.TextIOBase):
         self._buffer.write(text)
         if self._console_parts is not None:
             self._console_parts.append(text)
-        _send({
+        if self._active_segment_getter is not None:
+            segment = self._active_segment_getter()
+            if segment is not None:
+                segment["output"] = segment.get("output", "") + text
+        msg = {
             "type": "stream",
             "chunk_id": self._chunk_id,
             "stream": self._stream_name,
             "text": text,
-        })
+        }
+        if self._active_segment_getter is not None:
+            segment = self._active_segment_getter()
+            if segment is not None:
+                segment_index = segment.get("_index")
+                if isinstance(segment_index, int):
+                    msg["segment_index"] = segment_index
+                msg["segment_code"] = segment.get("code", "")
+        _send(msg)
         return len(text)
 
     def flush(self) -> None:
@@ -132,29 +146,94 @@ def _serialise_df(name: str, df, page: int = 0, page_size: int = 50) -> dict:
     }
 
 
-def _exec_and_last(code: str, ns: dict):
+def _statement_source(code: str, stmt: ast.stmt, pending_prefix: str = "") -> str:
+    """Return source for one top-level statement, preserving nearby comments."""
+    stmt_text = ast.get_source_segment(code, stmt) or ""
+    if pending_prefix:
+        stmt_text = f"{pending_prefix}{stmt_text}"
+    return stmt_text.rstrip()
+
+
+def _start_console_segment(code: str, console_segments: list[dict] | None,
+                           set_active_segment=None, progress_callback=None) -> dict | None:
+    if console_segments is None or not code:
+        return None
+    segment = {"code": code, "output": "", "_index": len(console_segments)}
+    console_segments.append(segment)
+    if progress_callback is not None:
+        progress_callback(segment)
+    if set_active_segment is not None:
+        set_active_segment(segment)
+    return segment
+
+
+def _exec_and_last(code: str, ns: dict, console_segments: list[dict] | None = None,
+                   set_active_segment=None, progress_callback=None):
     """Execute code; return the value of the final expression (or None)."""
     try:
         tree = ast.parse(code, mode="exec")
     except SyntaxError:
+        _start_console_segment(code.rstrip(), console_segments, set_active_segment, progress_callback)
         exec(code, ns)      # let exec raise the SyntaxError with full context
         return None
 
     if not tree.body:
         return None
 
-    last = tree.body[-1]
-    if not isinstance(last, ast.Expr):
-        exec(compile(tree, "<cell>", "exec"), ns)
-        return None
+    if any(isinstance(stmt, ast.ImportFrom) and stmt.module == "__future__" for stmt in tree.body):
+        _start_console_segment(code.rstrip(), console_segments, set_active_segment, progress_callback)
+        last = tree.body[-1]
+        if not isinstance(last, ast.Expr):
+            exec(compile(tree, "<cell>", "exec"), ns)
+            return None
+        rest = ast.Module(body=tree.body[:-1], type_ignores=[])
+        if rest.body:
+            exec(compile(rest, "<cell>", "exec"), ns)
+        expr = ast.Expression(body=last.value)
+        return eval(compile(expr, "<cell>", "eval"), ns)
 
-    # Split: run everything before the last expression, then eval it.
-    rest = ast.Module(body=tree.body[:-1], type_ignores=[])
-    if rest.body:
-        exec(compile(rest, "<cell>", "exec"), ns)
+    lines = code.splitlines(keepends=True)
+    last_value = None
+    prefix_cursor = 0
 
-    expr = ast.Expression(body=last.value)
-    return eval(compile(expr, "<cell>", "eval"), ns)
+    for index, stmt in enumerate(tree.body):
+        stmt_lineno = max(getattr(stmt, "lineno", 1) - 1, 0)
+        prefix = "".join(lines[prefix_cursor:stmt_lineno])
+        segment = None
+        if console_segments is not None:
+            segment_code = _statement_source(code, stmt, prefix)
+            if segment_code:
+                segment = _start_console_segment(
+                    segment_code,
+                    console_segments,
+                    set_active_segment,
+                    progress_callback,
+                )
+
+        try:
+            is_last_expr = index == len(tree.body) - 1 and isinstance(stmt, ast.Expr)
+            if is_last_expr:
+                expr = ast.Expression(body=stmt.value)
+                last_value = eval(compile(expr, "<cell>", "eval"), ns)
+            else:
+                module = ast.Module(body=[stmt], type_ignores=[])
+                ast.fix_missing_locations(module)
+                exec(compile(module, "<cell>", "exec"), ns)
+        finally:
+            if set_active_segment is not None and segment is not None:
+                set_active_segment(None)
+
+        prefix_cursor = max(
+            prefix_cursor,
+            getattr(stmt, "end_lineno", getattr(stmt, "lineno", prefix_cursor + 1)),
+        )
+
+    if console_segments is not None:
+        trailing = "".join(lines[prefix_cursor:]).rstrip()
+        if trailing:
+            _start_console_segment(trailing, console_segments, None, progress_callback)
+
+    return last_value
 
 
 # ---------------------------------------------------------------------------
@@ -167,8 +246,29 @@ def _exec_cell(chunk_id: str, code: str,
     global _ns
 
     console_parts: list[str] = []
-    stdout_buf = _StreamingBuffer(chunk_id, "stdout", console_parts)
-    stderr_buf = _StreamingBuffer(chunk_id, "stderr", console_parts)
+    console_segments: list[dict] = []
+    active_segment: dict | None = None
+
+    def set_active_segment(segment: dict | None) -> None:
+        nonlocal active_segment
+        active_segment = segment
+
+    def get_active_segment() -> dict | None:
+        return active_segment
+
+    def emit_progress(segment: dict) -> None:
+        segment_index = segment.get("_index", 0)
+        _send({
+            "type": "progress",
+            "chunk_id": chunk_id,
+            "line": int(segment_index) + 1 if isinstance(segment_index, int) else 1,
+            "total": max(1, len(console_segments)),
+            "expr_code": segment.get("code", ""),
+            "segment_index": segment_index if isinstance(segment_index, int) else None,
+        })
+
+    stdout_buf = _StreamingBuffer(chunk_id, "stdout", console_parts, get_active_segment)
+    stderr_buf = _StreamingBuffer(chunk_id, "stderr", console_parts, get_active_segment)
     plots:      list[str] = []
     plots_html: list[str] = []
     dataframes: list[dict] = []
@@ -191,12 +291,20 @@ def _exec_cell(chunk_id: str, code: str,
     # ---- execute -----------------------------------------------------------
     try:
         with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
-            last_val = _exec_and_last(code, _ns)
+            last_val = _exec_and_last(
+                code,
+                _ns,
+                console_segments,
+                set_active_segment,
+                emit_progress,
+            )
     except KeyboardInterrupt:
         error = "Interrupted by user"
         last_val = None
     except Exception:
         error = traceback.format_exc()
+    finally:
+        set_active_segment(None)
 
     # ---- detect DataFrames explicitly named as standalone expressions -------
     # Walk the top-level AST statements.  Any bare Name expression whose value
@@ -255,6 +363,11 @@ def _exec_cell(chunk_id: str, code: str,
     return {
         "type":       "result",
         "chunk_id":   chunk_id,
+        "source_code": code,
+        "console_segments": [
+            {"code": segment.get("code", ""), "output": segment.get("output", "")}
+            for segment in console_segments
+        ],
         "console":    "".join(console_parts),
         "stdout":     stdout_buf.getvalue(),
         "stderr":     stderr_buf.getvalue(),
