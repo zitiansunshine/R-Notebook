@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.5.3
+- Bug fixes
+
 ## 1.5.2
 - Updated the descriptions of the extension
 
