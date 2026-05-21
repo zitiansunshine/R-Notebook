@@ -1,11 +1,11 @@
 # R Notebook
 
-R Notebook is a VSCode extension (https://marketplace.visualstudio.com/items?itemName=zitiansunsh1ne.r-notebook) for `.Rmd`, `.qmd`, and `.ipynb` workflows with inline execution, notebook-style outputs, plots, and session-aware tooling for day-to-day data science work.
+R Notebook is a VSCode extension (https://marketplace.visualstudio.com/items?itemName=zitiansunsh1ne.r-notebook) for `.Rmd`, `.qmd`, and `.ipynb` workflows with in-line execution, notebook-style outputs, plots, and session-aware tooling for R/Python data science analysis.
 
 ## Features
 
-- Native `.Rmd`, `.qmd`, and `.ipynb` support with inline execution and notebook controls
-- Inline console output, plot rendering, and ordered multi-output display
+- Native `.Rmd`, `.qmd`, and `.ipynb` support with in-line execution and notebook controls
+- In-line console output, plot rendering, and ordered multi-output display
 - Session controls for selecting, restarting, and interrupting kernels
 - Session variable inspection for active notebooks
 - Multi-session support so separate notebooks can keep their own runtime state
@@ -14,7 +14,7 @@ R Notebook is a VSCode extension (https://marketplace.visualstudio.com/items?ite
 
 ## AI Editing Support
 
-R Notebook works well with AI-powered editing and review tools, including GitHub Copilot, Cursor, and Antigravity. You can keep an `.Rmd` or `.qmd` notebook open, ask an AI tool to revise analysis code or documentation, and continue executing chunks with the same inline notebook experience. 
+R Notebook works well with AI-powered editing and review tools, including GitHub Copilot, Cursor, and Antigravity. You can keep an `.Rmd` or `.qmd` notebook open, ask an AI tool to revise analysis code or documentation, and continue executing chunks with the same in-line notebook experience. 
 
 ## Preview
 
@@ -22,13 +22,13 @@ R Notebook works well with AI-powered editing and review tools, including GitHub
 
 ![Editing code with Cursor](images/Editing%20codes%20with%20Cursor.png)
 
-### Inline image rendering
+### In-line image rendering
 
-![Inline image rendering](images/Support%20for%20in-line%20rendering%20of%20images.png)
+![In-line image rendering](images/Support%20for%20in-line%20rendering%20of%20images.png)
 
-### Inline data-frame viewing
+### In-line data-frame viewing
 
-![Inline data-frame viewing](images/Support%20for%20in-line%20view%20of%20data%20frames.png)
+![In-line data-frame viewing](images/Support%20for%20in-line%20view%20of%20data%20frames.png)
 
 ### Detailed console output
 
@@ -55,4 +55,4 @@ npm run build
 npm run package
 ```
 
-Version `1.5.1` packages into the project root as `r-notebook-1.5.1.vsix`.
+Version `1.5.2` packages into the project root as `r-notebook-1.5.2.vsix`.
